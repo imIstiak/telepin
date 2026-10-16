@@ -93,10 +93,11 @@ function load(): Env {
   const env = parsed.data;
   if (env.NODE_ENV === "production") {
     const missing: string[] = [];
-    for (const key of ["TELEGRAM_BOT_TOKEN", "TOKEN_ENCRYPTION_KEY", "TELEGRAM_WEBHOOK_SECRET"] as const) {
+    // Missing Telegram token or allowlist doesn't crash the service: the bot is disabled / denies everyone
+    // (and tells each user their Telegram ID so it can be added to AUTHORIZED_TELEGRAM_USER_IDS).
+    for (const key of ["TOKEN_ENCRYPTION_KEY", "TELEGRAM_WEBHOOK_SECRET"] as const) {
       if (!env[key]) missing.push(key);
     }
-    if (env.AUTHORIZED_TELEGRAM_USER_IDS.length === 0) missing.push("AUTHORIZED_TELEGRAM_USER_IDS");
     if (env.STORAGE_DRIVER === "local") missing.push("STORAGE_DRIVER must be r2 in production");
     if (!env.APP_BASE_URL.startsWith("https://")) missing.push("APP_BASE_URL must be https in production");
     if (missing.length) throw new Error(`Missing/invalid production configuration: ${missing.join(", ")}`);
