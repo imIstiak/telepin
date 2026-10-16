@@ -47,12 +47,12 @@ const EnvSchema = z.object({
 
   AI_TEXT_PROVIDER: z.enum(["gemini", "mock"]).default("gemini"),
   AI_TEXT_API_KEY: z.string().default(""),
-  AI_TEXT_MODEL: z.string().default("gemini-2.5-flash"),
-  AI_EMBEDDING_MODEL: z.string().default("gemini-embedding-001"),
+  AI_TEXT_MODEL: z.string().default("gemini-3.8-flash"),
+  AI_EMBEDDING_MODEL: z.string().default("gemini-embedding-2"),
   AI_IMAGE_PROVIDER: z.enum(["gemini", "gradient", "mock"]).default("gemini"),
   AI_IMAGE_API_KEY: z.string().default(""),
-  /** imagen-* models use the Imagen endpoint; gemini-*-image models use generateContent. */
-  AI_IMAGE_MODEL: z.string().default("imagen-4.0-generate-001"),
+  /** imagen-* models use the Imagen endpoint (shut down Aug 2026); Gemini image models (e.g. gemini-nano-banana-2.1) use generateContent. */
+  AI_IMAGE_MODEL: z.string().default("gemini-nano-banana-2.1"),
 
   R2_ACCOUNT_ID: z.string().default(""),
   R2_ACCESS_KEY_ID: z.string().default(""),

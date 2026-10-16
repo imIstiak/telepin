@@ -101,7 +101,7 @@ export async function sendDraftCard(api: Api, chatId: string | number, d: PinDra
 
 export async function sendBatchSummary(api: Api, chatId: string | number, b: PinBatch, header?: string) {
   const text = (header ? `${header}\n\n` : "") + (await batchSummaryText(b));
-  return api.sendMessage(chatId, text, { parse_mode: "HTML", reply_markup: batchSummaryKeyboard(b) });
+  return api.sendMessage(chatId, text, { parse_mode: "HTML", reply_markup: batchSummaryKeyboard(b), link_preview_options: { is_disabled: true } });
 }
 
 /** Album preview of all finished images in a batch (max 10 per album). */
