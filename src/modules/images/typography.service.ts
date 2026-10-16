@@ -10,6 +10,8 @@ export interface TextLayout {
   width: number;
   height: number;
   fontSize: number;
+  /** Wrap width that produced this layout (re-use it to reproduce identical line breaks). */
+  boxWidth: number;
 }
 
 export interface LayoutOptions {
@@ -21,11 +23,19 @@ export interface LayoutOptions {
   minFontSize?: number;
   maxFontSize?: number;
   align?: "left" | "centre" | "right";
+  /** Extra tracking as a fraction of the font size (e.g. 0.15 for spaced-out caps). */
+  letterSpacing?: number;
+  /** Override the preset's line spacing multiplier. */
+  lineSpacing?: number;
+  /** Balance line lengths (default true). */
+  balance?: boolean;
 }
 
 async function renderAt(o: LayoutOptions, size: number): Promise<TextLayout> {
-  const p = TYPOGRAPHY_PRESETS[o.preset];
-  const markup = `<span foreground="${o.color}">${escapeMarkup(o.text)}</span>`;
+  const p: { file: string; family: string; lineSpacing: number; letterSpacing?: number } = TYPOGRAPHY_PRESETS[o.preset];
+  const tracking = o.letterSpacing ?? p.letterSpacing ?? 0;
+  const ls = tracking ? ` letter_spacing="${Math.round(size * tracking * 1024)}"` : "";
+  const markup = `<span foreground="${o.color}"${ls}>${escapeMarkup(o.text)}</span>`;
   const { data, info } = await sharp({
     text: {
       text: markup,
@@ -37,12 +47,12 @@ async function renderAt(o: LayoutOptions, size: number): Promise<TextLayout> {
       dpi: 72,
       rgba: true,
       wrap: "word",
-      spacing: Math.round(size * (p.lineSpacing - 1)),
+      spacing: Math.round(size * ((o.lineSpacing ?? p.lineSpacing) - 1)),
     },
   })
     .png()
     .toBuffer({ resolveWithObject: true });
-  return { buffer: data, width: info.width, height: info.height, fontSize: size };
+  return { buffer: data, width: info.width, height: info.height, fontSize: size, boxWidth: o.maxWidth };
 }
 
 /**
@@ -64,14 +74,30 @@ export async function layoutText(o: LayoutOptions): Promise<TextLayout> {
     }
   }
   if (!best) throw new TextOverflowError(`Quote is too long to fit the image at the minimum font size`);
+  return o.balance === false ? best : balanceLines(o, best);
+}
+
+/**
+ * Avoids ragged layouts and single-word last lines ("orphans"): narrows the text box while the
+ * line count stays the same, so lines come out similar in length.
+ */
+async function balanceLines(o: LayoutOptions, base: TextLayout): Promise<TextLayout> {
+  let best = base;
+  const minWidth = Math.round(o.maxWidth * 0.55);
+  for (let w = o.maxWidth - 24; w >= minWidth; w -= 24) {
+    const r = await renderAt({ ...o, maxWidth: w }, base.fontSize);
+    if (r.height > base.height || r.width > w) break;
+    best = r;
+  }
   return best;
 }
 
 /** Suggested max font size so short quotes don't become billboard-sized. */
 export function maxFontSizeFor(text: string, preset: TypographyPreset): number {
   const words = text.trim().split(/\s+/).length;
-  const base = words <= 8 ? 88 : words <= 14 ? 76 : words <= 22 ? 64 : 54;
-  return preset === "handwritten" ? base + 10 : preset.includes("sans") ? base - 6 : base;
+  // Editorial sizing: generous but never billboard-like; long quotes get smaller, calmer type.
+  const base = words <= 6 ? 76 : words <= 12 ? 64 : words <= 20 ? 56 : words <= 30 ? 48 : 42;
+  return Math.round(base * TYPOGRAPHY_PRESETS[preset].sizeScale);
 }
 
 export class TextOverflowError extends Error {}

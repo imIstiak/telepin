@@ -67,20 +67,25 @@ export function buildBackgroundPrompt(style: ImageStyle, sceneHint?: string | nu
   const s = IMAGE_STYLES[style];
   const scene = sceneHint?.trim() ? `${sceneHint.trim().replace(/\.$/, "")}. ` : "";
   return (
-    `${scene}Style: ${s.prompt}. Vertical 2:3 Pinterest composition with a large calm area of negative space ` +
-    `in the center for overlaid text. Photographic, high quality, aesthetic. ` +
-    `Absolutely no text, no letters, no words, no typography, no logos, no watermarks, no signatures.`
+    `${scene}Style: ${s.prompt}. ` +
+    `Art direction: high-end editorial Pinterest aesthetic, analog film photography look (35mm, Kodak Portra tones), ` +
+    `soft natural light, gentle shallow depth of field, muted cohesive color palette, subtle film grain, calm and minimal, ` +
+    `one clear subject placed near the bottom or edge, uncluttered. ` +
+    `Vertical 2:3 composition with a large, smooth, low-detail area of negative space across the middle for overlaid text. ` +
+    `Absolutely no text, no letters, no words, no typography, no logos, no watermarks, no signatures, no frames, no people's faces in close-up.`
   );
 }
 
 export const TYPOGRAPHY_PRESETS = {
-  elegant_serif: { label: "Elegant serif", file: "PlayfairDisplay_500Medium.ttf", family: "Playfair Display Medium", lineSpacing: 1.18 },
-  serif_italic: { label: "Serif italic", file: "PlayfairDisplay_400Regular_Italic.ttf", family: "Playfair Display Italic", lineSpacing: 1.2 },
-  book_serif: { label: "Book serif", file: "Lora_400Regular.ttf", family: "Lora", lineSpacing: 1.25 },
-  modern_sans: { label: "Modern sans", file: "Montserrat_500Medium.ttf", family: "Montserrat Medium", lineSpacing: 1.22 },
-  light_sans: { label: "Light sans", file: "Montserrat_300Light.ttf", family: "Montserrat Light", lineSpacing: 1.25 },
-  handwritten: { label: "Handwritten", file: "DancingScript_600SemiBold.ttf", family: "Dancing Script SemiBold", lineSpacing: 1.1 },
-} as const;
+  elegant_serif: { label: "Elegant italic (Cormorant)", file: "CormorantGaramond_500Medium_Italic.ttf", family: "Cormorant Garamond Medium Italic", lineSpacing: 1.28, sizeScale: 1.12 },
+  classic_serif: { label: "Classic serif (Cormorant)", file: "CormorantGaramond_500Medium.ttf", family: "Cormorant Garamond Medium", lineSpacing: 1.28, sizeScale: 1.1 },
+  serif_italic: { label: "Garamond italic", file: "EBGaramond_400Regular_Italic.ttf", family: "EB Garamond Italic", lineSpacing: 1.3, sizeScale: 1.0 },
+  book_serif: { label: "Playfair", file: "PlayfairDisplay_500Medium.ttf", family: "Playfair Display Medium", lineSpacing: 1.3, sizeScale: 0.92 },
+  modern_sans: { label: "Modern sans", file: "Montserrat_500Medium.ttf", family: "Montserrat Medium", lineSpacing: 1.4, sizeScale: 0.82, letterSpacing: 0.02 },
+  light_sans: { label: "Light sans", file: "Montserrat_300Light.ttf", family: "Montserrat Light", lineSpacing: 1.45, sizeScale: 0.84, letterSpacing: 0.03 },
+  display_thin: { label: "Thin display (Italiana)", file: "Italiana_400Regular.ttf", family: "Italiana", lineSpacing: 1.3, sizeScale: 0.95, letterSpacing: 0.02 },
+  handwritten: { label: "Handwritten", file: "DancingScript_600SemiBold.ttf", family: "Dancing Script SemiBold", lineSpacing: 1.15, sizeScale: 1.1 },
+} as const satisfies Record<string, { label: string; file: string; family: string; lineSpacing: number; sizeScale: number; letterSpacing?: number }>;
 
 export type TypographyPreset = keyof typeof TYPOGRAPHY_PRESETS;
 export const TYPOGRAPHY_KEYS = Object.keys(TYPOGRAPHY_PRESETS) as TypographyPreset[];

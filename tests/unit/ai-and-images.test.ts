@@ -116,7 +116,7 @@ describe("renderer", () => {
     const r = await renderQuoteImage({ background: await bg(), quote: "You taught me that not every promise is meant to be kept.", style: "dark_cinematic", typography: "elegant_serif" });
     const m = await sharp(r.buffer).metadata();
     expect([m.width, m.height, m.format]).toEqual([1000, 1500, "jpeg"]);
-    expect(r.textColor).toBe("#fbf8f3");
+    expect(r.textColor).toBe("#f7f1e8");
   });
 
   it("shrinks fonts for long quotes using measured layout", async () => {
@@ -128,7 +128,7 @@ describe("renderer", () => {
   it("uses dark text on light backgrounds", async () => {
     const light = await new GradientImageProvider({ beige_editorial: ["#f5efe6", "#efe6d8", "#e8dccb"] }).generateBackground("", { style: "beige_editorial", seed: 2 });
     const r = await renderQuoteImage({ background: light, quote: "Healing is quiet work.", style: "beige_editorial", typography: "book_serif" });
-    expect(r.textColor).toBe("#1c1a17");
+    expect(r.textColor).toBe("#2a2420");
   });
 
   it("refuses text that cannot fit instead of overflowing", async () => {
@@ -152,5 +152,19 @@ describe("Gemini schema conversion", () => {
     expect(s).not.toContain("minLength");
     expect(s).toContain('"properties"');
     expect(s).toContain('"enum"');
+  });
+});
+
+describe("aesthetic layout", () => {
+  it("puts text on a frosted card over busy backgrounds", async () => {
+    const dots = Array.from({ length: 300 }, (_, i) => `<circle cx="${(i * 97) % 1000}" cy="${(i * 211) % 1500}" r="${10 + (i % 25)}" fill="${["#d98ba0", "#7d9c6b", "#fbeee6"][i % 3]}"/>`).join("");
+    const busy = await sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1500"><rect width="100%" height="100%" fill="#e9c9c4"/>${dots}</svg>`)).png().toBuffer();
+    const r = await renderQuoteImage({ background: busy, quote: "My heart is learning to choose better.", style: "soft_romantic", typography: "elegant_serif" });
+    expect(r.layout).toBe("frosted");
+  });
+  it("keeps calm backgrounds clean", async () => {
+    const calm = await sharp({ create: { width: 1000, height: 1500, channels: 3, background: "#203040" } }).png().toBuffer();
+    const r = await renderQuoteImage({ background: calm, quote: "Still here.", style: "moody_blue", typography: "classic_serif" });
+    expect(r.layout).toBe("clean");
   });
 });
