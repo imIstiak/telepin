@@ -141,3 +141,16 @@ describe("renderer", () => {
     expect([r.width, r.height]).toEqual([1000, 1500]);
   });
 });
+
+describe("Gemini schema conversion", () => {
+  it("keeps only the documented JSON Schema subset", async () => {
+    const { toGeminiSchema } = await import("../../src/modules/ai/gemini.provider");
+    const { z } = await import("zod");
+    const { QuoteBatchSchema } = await import("../../src/modules/ai/schemas");
+    const s = JSON.stringify(toGeminiSchema(z.toJSONSchema(QuoteBatchSchema, { target: "draft-7" })));
+    expect(s).not.toContain("$schema");
+    expect(s).not.toContain("minLength");
+    expect(s).toContain('"properties"');
+    expect(s).toContain('"enum"');
+  });
+});
