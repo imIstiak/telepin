@@ -1,0 +1,21 @@
+// Loaded before every test file (vitest setupFiles) so config/env.ts sees test settings.
+process.env.NODE_ENV = "test";
+process.env.DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/pinterest_agent_test";
+process.env.REDIS_URL = process.env.TEST_REDIS_URL ?? "redis://localhost:6379/1";
+process.env.AI_TEXT_PROVIDER = "mock";
+process.env.AI_IMAGE_PROVIDER = "mock";
+process.env.STORAGE_DRIVER = "local";
+process.env.LOCAL_STORAGE_DIR = ".data/test-storage";
+process.env.APP_BASE_URL = "https://test.example.com";
+process.env.TOKEN_ENCRYPTION_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+process.env.AUTHORIZED_TELEGRAM_USER_IDS = "111";
+process.env.TELEGRAM_BOT_TOKEN = "123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz";
+process.env.TELEGRAM_WEBHOOK_SECRET = "test-secret";
+process.env.PINTEREST_CLIENT_ID = "client-id";
+process.env.PINTEREST_CLIENT_SECRET = "client-secret";
+process.env.PINTEREST_REDIRECT_URI = "https://test.example.com/oauth/pinterest/callback";
+process.env.PINTEREST_API_BASE = "http://127.0.0.1:4599/v5";
+process.env.PINTEREST_OAUTH_TOKEN_URL = "http://127.0.0.1:4599/v5/oauth/token";
+process.env.MISSED_SCHEDULE_GRACE_MINUTES = "10";
+process.env.PINTEREST_WRITE_TIMEOUT_MS = "1500";
+process.env.BOT_RATE_LIMIT_PER_MINUTE = "100000";
