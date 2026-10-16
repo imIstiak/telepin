@@ -82,7 +82,7 @@ Create a bucket, connect a **custom domain** (recommended for production; `r2.de
 ### Pinterest app
 
 1. developers.pinterest.com → create app; add redirect URI `https://<api-domain>/oauth/pinterest/callback`.
-2. Scopes used: `boards:read, pins:read, pins:write, user_accounts:read`.
+2. Scopes used: `boards:read, boards:write, pins:read, pins:write, user_accounts:read` (Pinterest requires boards:write to create Pins).
 3. New apps start with **Trial access**: per Pinterest's docs, pins created with trial access go to the sandbox (`PINTEREST_API_BASE=https://api-sandbox.pinterest.com/v5`) and are not public. Apply for **Standard access** to publish real pins. Verify current rules in Pinterest's documentation.
 4. In Telegram: `/connect` → authorize → `/boards`.
 

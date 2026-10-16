@@ -31,7 +31,7 @@ describe("Pinterest OAuth", () => {
   it("builds an authorize URL with state, and the state is single-use", async () => {
     const url = new URL(await createAuthorizationUrl(userId));
     expect(url.origin + url.pathname).toBe("https://www.pinterest.com/oauth/");
-    expect(url.searchParams.get("scope")).toBe("boards:read,pins:read,pins:write,user_accounts:read");
+    expect(url.searchParams.get("scope")).toBe("boards:read,boards:write,pins:read,pins:write,user_accounts:read");
     const state = url.searchParams.get("state")!;
     expect(await consumeState(state)).toBe(userId);
     await expect(consumeState(state)).rejects.toBeInstanceOf(OAuthStateError);

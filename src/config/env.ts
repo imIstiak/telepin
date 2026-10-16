@@ -43,7 +43,7 @@ const EnvSchema = z.object({
   PINTEREST_OAUTH_AUTHORIZE_URL: z.string().url().default("https://www.pinterest.com/oauth/"),
   PINTEREST_OAUTH_TOKEN_URL: z.string().url().default("https://api.pinterest.com/v5/oauth/token"),
   PINTEREST_WRITE_TIMEOUT_MS: z.coerce.number().int().min(500).default(45_000),
-  PINTEREST_SCOPES: z.string().default("boards:read,pins:read,pins:write,user_accounts:read"),
+  PINTEREST_SCOPES: z.string().default("boards:read,boards:write,pins:read,pins:write,user_accounts:read"),
 
   AI_TEXT_PROVIDER: z.enum(["gemini", "mock"]).default("gemini"),
   AI_TEXT_API_KEY: z.string().default(""),

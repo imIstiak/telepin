@@ -32,7 +32,7 @@ export async function schedulableDrafts(batchId: string) {
   for (const d of drafts) {
     if (d.status === "CANCELLED" || d.approvalStatus === "REJECTED") continue;
     if (["SCHEDULED", "PUBLISHING", "PUBLISHED", "PUBLISH_UNKNOWN"].includes(d.status)) continue;
-    if (d.status === "FAILED") {
+    if (d.status === "FAILED" && !(d.selectedImageId && d.quote)) {
       skipped.push(`Pin ${d.position} failed to generate and will be skipped`);
       continue;
     }
@@ -100,7 +100,8 @@ export async function confirmPlan(userId: string, batchId: string): Promise<PinS
     if (drafts.length !== ids.length) throw new StaleActionError("Pins changed since the review. Please review again.");
     for (const d of drafts) {
       if (d.version !== plan.draftVersions[d.id]) throw new StaleActionError(`Pin ${d.position} changed after the review. Please review the schedule again.`);
-      if (!["READY_FOR_REVIEW", "NEEDS_EDIT", "APPROVED"].includes(d.status) || !d.selectedImageId || !d.selectedBoardId) {
+      // FAILED pins that already have an image (e.g. a failed publish) can be scheduled again.
+      if (!["READY_FOR_REVIEW", "NEEDS_EDIT", "APPROVED", "FAILED"].includes(d.status) || !d.selectedImageId || !d.selectedBoardId) {
         throw new StaleActionError(`Pin ${d.position} is no longer ready. Please review again.`);
       }
       const board = await getOwnedBoard(userId, d.selectedBoardId);

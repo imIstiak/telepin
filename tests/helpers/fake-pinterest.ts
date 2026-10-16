@@ -44,7 +44,7 @@ export async function startFakePinterest(port = 4599): Promise<FakePinterest> {
     if (req.body.grant_type === "refresh_token" && req.body.refresh_token !== "refresh-1") return void res.status(400).json({ message: "invalid refresh" });
     const access = `access-${++tokenSeq}`;
     state.validTokens.add(access);
-    res.json({ access_token: access, refresh_token: "refresh-1", expires_in: 2592000, refresh_token_expires_in: 31536000, scope: "boards:read,pins:read,pins:write,user_accounts:read", token_type: "bearer" });
+    res.json({ access_token: access, refresh_token: "refresh-1", expires_in: 2592000, refresh_token_expires_in: 31536000, scope: "boards:read,boards:write,pins:read,pins:write,user_accounts:read", token_type: "bearer" });
   });
 
   app.get("/v5/user_account", (req, res) => {

@@ -168,6 +168,16 @@ export async function publishSchedule(scheduleId: string, revision: number): Pro
         return "unknown";
       }
       if (e instanceof PinterestApiError) {
+        // Missing OAuth scopes: a fresh token won't help — pause and ask the user to reconnect.
+        if ((e.isAuth || e.isPermission) && /scope|sufficient permissions/i.test(e.message)) {
+          await requeue(c, 0, e.message, { pause: true });
+          await notifier.text(
+            c.schedule.userId,
+            `🔌 Pinterest needs extra permissions to publish (${escapeHtml(e.message.slice(0, 160))}).\nSend /connect, approve again, then /resume — pin ${c.draft.position} and the rest of the queue are paused, not lost.`,
+            { force: true },
+          );
+          return "requeued";
+        }
         if (e.isAuth && authRetry === 0) {
           try {
             token = (await getValidAccessToken(c.schedule.userId, { forceRefresh: true })).token;
