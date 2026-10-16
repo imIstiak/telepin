@@ -4,7 +4,7 @@ import { GeminiImageProvider, GeminiTextProvider } from "./gemini.provider";
 import { GradientImageProvider, MockImageProvider, MockTextProvider } from "./mock.provider";
 import type { ImageProvider, TextProvider } from "./provider.interface";
 
-const palettes = Object.fromEntries(Object.entries(IMAGE_STYLES).map(([k, v]) => [k, v.palette]));
+const palettes = Object.fromEntries(Object.entries(IMAGE_STYLES).map(([k, v]) => [k, v.fallback]));
 
 let text: TextProvider | undefined;
 let image: ImageProvider | undefined;

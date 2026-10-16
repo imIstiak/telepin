@@ -1,19 +1,40 @@
 import sharp, { type OverlayOptions } from "sharp";
-import { isLightStyle, type ImageStyle, type TypographyPreset } from "./styles";
-import { layoutText, maxFontSizeFor } from "./typography.service";
+import { resolveStyle, styleConfig, type ImageStyle, type StyleConfig, type TextRegion, type TypographyPreset } from "./styles";
+import { layoutText, maxFontSizeFor, minFontSizeFor, renderAt } from "./typography.service";
 
 export const PIN_WIDTH = 1000;
 export const PIN_HEIGHT = 1500;
-/** Generous side margins: editorial pins breathe. */
-export const MARGIN_X = 140;
+/** Side margins (spec: 100–120px). */
+export const MARGIN_X = 110;
+/** Top/bottom safe margins — the quote never comes closer to the edge than this. */
+export const MARGIN_Y = 110;
+export const JPEG_QUALITY = 91;
+/** WCAG contrast targets: against the average background and against the worst 10% of pixels. */
+export const MIN_CONTRAST = 4.5;
+export const MIN_WORST_CONTRAST = 2.6;
 
 export interface RenderOptions {
   background: Buffer;
   quote: string;
-  style: ImageStyle;
-  typography: TypographyPreset;
-  watermark?: string | null;
+  style: ImageStyle | string;
+  /** Explicit preset; when omitted the style's own typography is used. */
+  typography?: TypographyPreset | null;
   quality?: number;
+}
+
+export interface RenderQA {
+  dimensionsOk: boolean;
+  aspectRatioOk: boolean;
+  validJpeg: boolean;
+  quotePreserved: boolean;
+  noClipping: boolean;
+  safeMargins: boolean;
+  contrastOk: boolean;
+  contrast: number;
+  worstContrast: number;
+  /** Rendering never adds logos, watermarks, footers, ornaments or extra text. */
+  noBranding: true;
+  passed: boolean;
 }
 
 export interface RenderResult {
@@ -23,8 +44,13 @@ export interface RenderResult {
   mimeType: "image/jpeg";
   fontSize: number;
   textColor: string;
-  layout: "clean" | "frosted";
-  zone: "upper" | "middle" | "lower";
+  region: TextRegion;
+  /** "clean" = text straight on the photo; "veil" = a soft, edgeless local tonal veil was needed. */
+  layout: "clean" | "veil";
+  veilStrength: number;
+  typography: TypographyPreset;
+  box: { left: number; top: number; width: number; height: number };
+  qa: RenderQA;
 }
 
 /** Fits any background to 1000x1500 (2:3), cropping toward the most interesting region. */
@@ -32,214 +58,253 @@ export async function prepareBackground(input: Buffer): Promise<Buffer> {
   return sharp(input).rotate().resize(PIN_WIDTH, PIN_HEIGHT, { fit: "cover", position: sharp.strategy.attention }).removeAlpha().png().toBuffer();
 }
 
-/** Matte film grade: slightly lifted blacks, softer saturation, fine grain. Makes AI images feel less "digital". */
-async function filmGrade(bg: Buffer): Promise<Buffer> {
-  const graded = await sharp(bg).modulate({ saturation: 0.86, brightness: 1.0 }).linear(0.93, 10).png().toBuffer();
-  const grain = await sharp({ create: { width: PIN_WIDTH, height: PIN_HEIGHT, channels: 3, background: "#808080", noise: { type: "gaussian", mean: 128, sigma: 28 } } })
-    .greyscale()
-    .png()
-    .toBuffer();
-  const grainAlpha = await sharp(grain).ensureAlpha(0.07).png().toBuffer();
-  return sharp(graded).composite([{ input: grainAlpha, blend: "overlay" }]).png().toBuffer();
-}
-
-/** Above this local-contrast level, text sits on a frosted card instead of directly on the photo. */
-export const BUSY_THRESHOLD = 0.013;
-
-type Zone = "upper" | "middle" | "lower";
-const ZONES: Record<Zone, { top: number; height: number }> = {
-  upper: { top: 150, height: 560 },
-  middle: { top: 470, height: 560 },
-  lower: { top: 790, height: 560 },
-};
-
-interface RegionStats {
-  luminance: number; // 0..1
-  busyness: number; // stdev of luminance 0..~0.5
-}
-
-async function regionStats(bg: Buffer, top: number, height: number): Promise<RegionStats> {
-  const { data } = await sharp(bg)
-    .extract({ left: MARGIN_X - 40, top, width: PIN_WIDTH - 2 * (MARGIN_X - 40), height })
-    .resize(96, 96, { fit: "fill" })
-    .removeAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-  // Luminance mean, plus "busyness" = average local colour change between neighbouring pixels
-  // (catches patterned/cluttered areas even when overall brightness is uniform).
-  let lum = 0;
-  let edges = 0;
-  const px = (i: number) => [data[i]!, data[i + 1]!, data[i + 2]!] as const;
-  for (let y = 0; y < 96; y++) {
-    for (let x = 0; x < 96; x++) {
-      const i = (y * 96 + x) * 3;
-      const [r, g, b] = px(i);
-      lum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      if (x < 95) {
-        const [r2, g2, b2] = px(i + 3);
-        edges += Math.abs(r - r2) + Math.abs(g - g2) + Math.abs(b - b2);
-      }
-      if (y < 95) {
-        const [r3, g3, b3] = px(i + 96 * 3);
-        edges += Math.abs(r - r3) + Math.abs(g - g3) + Math.abs(b - b3);
-      }
-    }
-  }
-  return { luminance: lum / (96 * 96 * 255), busyness: edges / (2 * 96 * 95 * 3 * 255) };
-}
-
-/** Picks the calmest band for the text (prefers the middle unless it's clearly busier). */
-async function chooseZone(bg: Buffer): Promise<{ zone: Zone; stats: RegionStats }> {
-  const entries = await Promise.all((Object.keys(ZONES) as Zone[]).map(async (z) => [z, await regionStats(bg, ZONES[z].top, ZONES[z].height)] as const));
-  const middle = entries.find(([z]) => z === "middle")!;
-  const calmest = entries.reduce((a, b) => (b[1].busyness < a[1].busyness ? b : a));
-  const pick = calmest[1].busyness * 1.6 + 0.005 < middle[1].busyness ? calmest : middle;
-  return { zone: pick[0], stats: pick[1] };
-}
-
 function svg(body: string) {
   return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${PIN_WIDTH}" height="${PIN_HEIGHT}">${body}</svg>`);
 }
 
-/** Soft elliptical glow behind the text: lifts contrast without a visible box. */
-function softScrim(cx: number, cy: number, rx: number, ry: number, dark: boolean, strength: number) {
-  const c = dark ? "#000000" : "#ffffff";
+/** Style-specific colour grade (not a universal filter): saturation, black lift, gentle tint, grain, vignette. */
+export async function gradeBackground(bg: Buffer, s: StyleConfig): Promise<Buffer> {
+  const g = s.grade;
+  let img = sharp(bg).modulate({ saturation: g.saturation });
+  if (g.lift > 0) img = img.linear(1 - g.lift / 255, g.lift);
+  let out = await img.png().toBuffer();
+  const layers: OverlayOptions[] = [];
+  if (g.tint && g.tint.strength > 0) {
+    layers.push({ input: svg(`<rect width="100%" height="100%" fill="${g.tint.color}" fill-opacity="${g.tint.strength}"/>`), blend: "soft-light" });
+  }
+  if (g.grain > 0) {
+    const grain = await sharp({ create: { width: PIN_WIDTH, height: PIN_HEIGHT, channels: 3, background: "#808080", noise: { type: "gaussian", mean: 128, sigma: 28 } } })
+      .greyscale()
+      .ensureAlpha(Math.min(0.15, g.grain))
+      .png()
+      .toBuffer();
+    layers.push({ input: grain, blend: "overlay" });
+  }
+  if (g.vignette > 0) {
+    layers.push({
+      input: svg(`<defs><radialGradient id="v" cx="50%" cy="50%" r="75%"><stop offset="0.6" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="${g.vignette.toFixed(2)}"/></radialGradient></defs><rect width="100%" height="100%" fill="url(#v)"/>`),
+    });
+  }
+  if (layers.length) out = await sharp(out).composite(layers).png().toBuffer();
+  return out;
+}
+
+// ---------- colour / contrast helpers ----------
+
+const hexRgb = (hex: string) => {
+  const h = hex.replace("#", "");
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)) as [number, number, number];
+};
+const lin = (c: number) => {
+  const v = c / 255;
+  return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+};
+/** WCAG relative luminance 0..1. */
+export const relLum = (r: number, g: number, b: number) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+export const hexLum = (hex: string) => relLum(...hexRgb(hex));
+export const contrastRatio = (a: number, b: number) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+
+export interface RegionStats {
+  mean: number; // mean relative luminance
+  p10: number; // darkest 10%
+  p90: number; // brightest 10%
+  busyness: number; // local edge energy 0..~0.3
+}
+
+/** Luminance distribution + texture of the actual pixels behind the quote box. */
+export async function regionStats(bg: Buffer, box: { left: number; top: number; width: number; height: number }): Promise<RegionStats> {
+  const n = 80;
+  const { data } = await sharp(bg).extract(box).resize(n, n, { fit: "fill" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const lums: number[] = [];
+  let edges = 0;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const i = (y * n + x) * 3;
+      lums.push(relLum(data[i]!, data[i + 1]!, data[i + 2]!));
+      if (x < n - 1) edges += Math.abs(data[i]! - data[i + 3]!) + Math.abs(data[i + 1]! - data[i + 4]!) + Math.abs(data[i + 2]! - data[i + 5]!);
+      if (y < n - 1) {
+        const j = i + n * 3;
+        edges += Math.abs(data[i]! - data[j]!) + Math.abs(data[i + 1]! - data[j + 1]!) + Math.abs(data[i + 2]! - data[j + 2]!);
+      }
+    }
+  }
+  const sorted = [...lums].sort((a, b) => a - b);
+  const q = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]!;
+  return { mean: lums.reduce((a, b) => a + b, 0) / lums.length, p10: q(0.1), p90: q(0.9), busyness: edges / (2 * n * (n - 1) * 3 * 255) };
+}
+
+/** Contrast of a text colour against a region, with an optional soft veil of `veilHex` at opacity `a` mixed in. */
+function evaluate(textHex: string, st: RegionStats, veil?: { hex: string; a: number }) {
+  const mix = (l: number) => (veil ? l * (1 - veil.a) + hexLum(veil.hex) * veil.a : l);
+  const t = hexLum(textHex);
+  const dark = t < 0.25;
+  const worstBg = dark ? mix(st.p10) : mix(st.p90); // dark text struggles on the darkest pixels and vice versa
+  return { contrast: contrastRatio(t, mix(st.mean)), worst: contrastRatio(t, worstBg) };
+}
+
+const REGION_CENTER: Record<TextRegion, number> = { upper: 0.27, upper_middle: 0.39, middle: 0.5, lower: 0.7 };
+const REGION_ORDER: Record<TextRegion, TextRegion[]> = {
+  upper: ["upper", "upper_middle", "middle", "lower"],
+  upper_middle: ["upper_middle", "middle", "upper", "lower"],
+  middle: ["middle", "upper_middle", "lower", "upper"],
+  lower: ["lower", "middle", "upper_middle", "upper"],
+};
+
+interface Plan {
+  region: TextRegion;
+  color: string;
+  veil: number;
+  veilHex: string;
+  contrast: number;
+  worst: number;
+  box: { left: number; top: number; width: number; height: number };
+  score: number;
+}
+
+/**
+ * Chooses region, text colour and (only if needed) a soft veil. Fallback chain per spec:
+ * style colour → alternate colour → subtle veil → next region → best effort flagged for regeneration.
+ */
+async function planText(bg: Buffer, s: StyleConfig, blockW: number, blockH: number): Promise<Plan> {
+  const alternates = { dark: ["#1E1A18"], light: ["#FFFFFF"] };
+  let best = null as Plan | null;
+  for (const [ri, region] of REGION_ORDER[s.textRegion].entries()) {
+    const cy = Math.round(PIN_HEIGHT * REGION_CENTER[region]);
+    const padX = 40;
+    const padY = 50;
+    const top = Math.max(MARGIN_Y, Math.min(PIN_HEIGHT - MARGIN_Y - blockH, cy - Math.round(blockH / 2)));
+    const box = {
+      left: Math.max(0, Math.round((PIN_WIDTH - blockW) / 2) - padX),
+      top: Math.max(0, top - padY),
+      width: Math.min(PIN_WIDTH, blockW + 2 * padX),
+      height: Math.min(PIN_HEIGHT - Math.max(0, top - padY), blockH + 2 * padY),
+    };
+    const st = await regionStats(bg, box);
+    const textBox = { left: Math.round((PIN_WIDTH - blockW) / 2), top, width: blockW, height: blockH };
+    const candidates = [s.text.dark, s.text.light, ...alternates.dark, ...alternates.light];
+    // Region penalty keeps us in the style's preferred region unless another is clearly better.
+    const regionPenalty = ri * 0.6 + st.busyness * 25;
+    const veilSteps = s.veil ? [0, 0.16, 0.26, 0.36] : [0];
+    for (const [vi, a] of veilSteps.entries()) {
+      for (const [ci, color] of candidates.entries()) {
+        const isDark = hexLum(color) < 0.25;
+        const veilHex = isDark ? "#FFFFFF" : "#000000";
+        const e = evaluate(color, st, a ? { hex: veilHex, a } : undefined);
+        const ok = e.contrast >= MIN_CONTRAST && e.worst >= MIN_WORST_CONTRAST;
+        // Once contrast passes, prefer the style's own colours; otherwise maximise contrast.
+        const score = (ok ? 100 : 0) + Math.min(e.contrast, 9) * (ok ? 0.2 : 1) - regionPenalty - vi * 1.5 - (ci >= 2 ? 2 : 0);
+        const plan: Plan = { region, color, veil: a, veilHex, contrast: e.contrast, worst: e.worst, box: textBox, score };
+        if (!best || plan.score > best.score) best = plan;
+      }
+      // Stop escalating the veil as soon as this region has a passing option.
+      if (best && best.region === region && best.score >= 100) return best;
+    }
+    if (best && best.score >= 100 && st.busyness < 0.06) return best;
+  }
+  return best!;
+}
+
+/** Soft, edgeless elliptical tonal veil — never a visible box or panel. */
+function softVeil(box: Plan["box"], hex: string, a: number) {
+  const cx = box.left + box.width / 2;
+  const cy = box.top + box.height / 2;
+  const rx = box.width * 0.72 + 80;
+  const ry = box.height * 0.75 + 110;
   return svg(`<defs><radialGradient id="g" cx="${cx}" cy="${cy}" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(${cx} ${cy}) scale(${rx} ${ry}) translate(${-cx} ${-cy})">
-    <stop offset="0" stop-color="${c}" stop-opacity="${strength.toFixed(2)}"/>
-    <stop offset="0.55" stop-color="${c}" stop-opacity="${(strength * 0.6).toFixed(2)}"/>
-    <stop offset="1" stop-color="${c}" stop-opacity="0"/>
+    <stop offset="0" stop-color="${hex}" stop-opacity="${a.toFixed(2)}"/>
+    <stop offset="0.6" stop-color="${hex}" stop-opacity="${(a * 0.75).toFixed(2)}"/>
+    <stop offset="1" stop-color="${hex}" stop-opacity="0"/>
   </radialGradient></defs><rect width="100%" height="100%" fill="url(#g)"/>`);
 }
 
-/** Gentle edge vignette for depth. */
-function vignette(strength: number) {
-  return svg(`<defs><radialGradient id="v" cx="50%" cy="50%" r="75%">
-    <stop offset="0.6" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="${strength.toFixed(2)}"/>
-  </radialGradient></defs><rect width="100%" height="100%" fill="url(#v)"/>`);
-}
-
-/** Frosted-glass card for busy backgrounds: blurred copy of the image inside a rounded rectangle. */
-async function frostedCard(bg: Buffer, box: { left: number; top: number; width: number; height: number }, dark: boolean) {
-  const radius = 28;
-  const blurred = await sharp(bg)
-    .extract(box)
-    .blur(22)
-    .modulate({ brightness: dark ? 0.82 : 1.1 })
-    .png()
-    .toBuffer();
-  const tint = dark ? "#000000" : "#ffffff";
-  const mask = Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${box.width}" height="${box.height}"><rect width="100%" height="100%" rx="${radius}" ry="${radius}" fill="#fff"/></svg>`,
-  );
-  const card = await sharp(blurred)
-    .composite([
-      { input: Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${box.width}" height="${box.height}"><rect width="100%" height="100%" fill="${tint}" fill-opacity="${dark ? 0.22 : 0.28}"/></svg>`) },
-      { input: mask, blend: "dest-in" },
-    ])
-    .png()
-    .toBuffer();
-  const border = svg(
-    `<rect x="${box.left + 0.5}" y="${box.top + 0.5}" width="${box.width - 1}" height="${box.height - 1}" rx="${radius}" ry="${radius}" fill="none" stroke="${dark ? "#ffffff" : "#000000"}" stroke-opacity="0.14" stroke-width="1.5"/>`,
-  );
-  return [
-    { input: card, top: box.top, left: box.left },
-    { input: border, top: 0, left: 0 },
-  ] as OverlayOptions[];
-}
-
 export async function renderQuoteImage(o: RenderOptions): Promise<RenderResult> {
+  const styleId = resolveStyle(o.style);
+  const s = styleConfig(styleId);
+  const typography = o.typography ?? s.typography;
   const base = await prepareBackground(o.background);
-  const bg = await filmGrade(base);
-  const { zone, stats } = await chooseZone(bg);
-
-  // Light text on dark/mid scenes, dark text on bright scenes.
-  const lightBg = stats.luminance > 0.58 || (stats.luminance > 0.46 && isLightStyle(o.style));
-  const textColor = lightBg ? "#2a2420" : "#f7f1e8";
-  const accent = lightBg ? "#2a2420" : "#f7f1e8";
-  const layout: "clean" | "frosted" = stats.busyness > BUSY_THRESHOLD ? "frosted" : "clean";
+  const bg = await gradeBackground(base, s);
 
   const maxWidth = PIN_WIDTH - 2 * MARGIN_X;
-  const z = ZONES[zone];
-  const text = await layoutText({
+  const maxHeight = Math.round(PIN_HEIGHT * 0.52);
+  // Layout is colour-independent: measure once, then decide colour from the real pixels behind it.
+  const probe = await layoutText({
     text: o.quote,
-    preset: o.typography,
-    color: textColor,
+    preset: typography,
+    color: "#000000",
     maxWidth,
-    maxHeight: z.height - 170,
-    minFontSize: 28,
-    maxFontSize: maxFontSizeFor(o.quote, o.typography),
+    maxHeight,
+    minFontSize: minFontSizeFor(o.quote, typography),
+    maxFontSize: maxFontSizeFor(o.quote, typography),
   });
-
-  // Decorative opening quote mark in the same face, faded and trimmed to the glyph itself.
-  const markPreset = o.typography === "handwritten" || o.typography === "display_thin" ? "elegant_serif" : o.typography;
-  const markSize = Math.round(text.fontSize * 2.1);
-  const mark = await layoutText({ text: "“", preset: markPreset, color: accent, maxWidth: 300, maxHeight: 600, minFontSize: markSize, maxFontSize: markSize, balance: false });
-  const markTrim = await sharp(mark.buffer).trim({ threshold: 1 }).ensureAlpha().linear([1, 1, 1, 0.42], [0, 0, 0, 0]).png().toBuffer({ resolveWithObject: true });
-
-  const gapMark = Math.round(text.fontSize * 0.55);
-  const dividerGap = Math.round(text.fontSize * 0.7);
-  const blockHeight = markTrim.info.height + gapMark + text.height + dividerGap + 2;
-  const blockTop = Math.round(z.top + (z.height - blockHeight) / 2);
-  const markTop = blockTop;
-  const textTop = blockTop + markTrim.info.height + gapMark;
+  const plan = await planText(bg, s, probe.width, probe.height);
+  const text = await renderAt({ text: o.quote, preset: typography, color: plan.color, maxWidth: probe.boxWidth, maxHeight: probe.height }, probe.fontSize);
+  const textTop = plan.box.top;
   const textLeft = Math.round((PIN_WIDTH - text.width) / 2);
-  const dividerY = textTop + text.height + dividerGap;
 
-  const layers: OverlayOptions[] = [{ input: vignette(lightBg ? 0.18 : 0.38), top: 0, left: 0 }];
-
-  if (layout === "frosted") {
-    const padX = 64;
-    const padY = 56;
-    const cardWidth = Math.min(PIN_WIDTH - 80, Math.max(text.width, 300) + padX * 2);
-    const box = {
-      left: Math.round((PIN_WIDTH - cardWidth) / 2),
-      top: Math.max(40, blockTop - padY),
-      width: cardWidth,
-      height: Math.min(PIN_HEIGHT - 80, blockHeight + padY * 2),
-    };
-    layers.push(...(await frostedCard(bg, box, !lightBg)));
-  } else {
-    // Contrast need: how close the background is to the text colour.
-    const gap = lightBg ? stats.luminance : 1 - stats.luminance;
-    const strength = Math.min(0.5, Math.max(0.12, 0.62 - gap * 0.6));
-    layers.push({ input: softScrim(PIN_WIDTH / 2, textTop + text.height / 2, maxWidth * 0.78, text.height * 0.95 + 120, !lightBg, strength), top: 0, left: 0 });
-  }
-
-  // Soft shadow only for light text on photos.
-  if (!lightBg) {
-    const shadow = await layoutText({ text: o.quote, preset: o.typography, color: "#000000", maxWidth: text.boxWidth, maxHeight: z.height, minFontSize: text.fontSize, maxFontSize: text.fontSize, balance: false });
-    const soft = await sharp(shadow.buffer).blur(10).ensureAlpha().linear([1, 1, 1, 0.45], [0, 0, 0, 0]).png().toBuffer();
+  const layers: OverlayOptions[] = [];
+  if (plan.veil > 0) layers.push({ input: softVeil(plan.box, plan.veilHex, plan.veil), top: 0, left: 0 });
+  // Very soft shadow only for light text over photos: depth without a visible effect.
+  const lightText = hexLum(plan.color) >= 0.25;
+  if (lightText) {
+    const shadow = await renderAt({ text: o.quote, preset: typography, color: "#000000", maxWidth: text.boxWidth, maxHeight: text.height }, text.fontSize);
+    const soft = await sharp(shadow.buffer).blur(9).ensureAlpha().linear([1, 1, 1, 0.38], [0, 0, 0, 0]).png().toBuffer();
     layers.push({ input: soft, top: textTop + 2, left: textLeft + 1 });
   }
-
-  layers.push({ input: markTrim.data, top: Math.max(0, markTop), left: Math.round((PIN_WIDTH - markTrim.info.width) / 2) });
   layers.push({ input: text.buffer, top: textTop, left: textLeft });
-  layers.push({
-    input: svg(`<line x1="${PIN_WIDTH / 2 - 28}" y1="${dividerY}" x2="${PIN_WIDTH / 2 + 28}" y2="${dividerY}" stroke="${accent}" stroke-opacity="0.55" stroke-width="1.5"/>`),
-    top: 0,
-    left: 0,
-  });
-
-  if (o.watermark?.trim()) {
-    const wm = await layoutText({
-      balance: false,
-      text: o.watermark.trim().slice(0, 40).toUpperCase(),
-      preset: "light_sans",
-      color: accent,
-      maxWidth: 700,
-      maxHeight: 50,
-      minFontSize: 16,
-      maxFontSize: 18,
-      letterSpacing: 0.28,
-    });
-    const wmFaded = await sharp(wm.buffer).ensureAlpha().linear([1, 1, 1, 0.75], [0, 0, 0, 0]).png().toBuffer();
-    layers.push({ input: wmFaded, top: PIN_HEIGHT - 72 - wm.height, left: Math.round((PIN_WIDTH - wm.width) / 2) });
-  }
 
   const buffer = await sharp(bg)
     .composite(layers)
-    .jpeg({ quality: o.quality ?? 90, mozjpeg: true, chromaSubsampling: "4:4:4" })
+    .toColourspace("srgb")
+    .withIccProfile("srgb")
+    .jpeg({ quality: o.quality ?? JPEG_QUALITY, mozjpeg: true, chromaSubsampling: "4:4:4" })
     .toBuffer();
   const meta = await sharp(buffer).metadata();
-  return { buffer, width: meta.width!, height: meta.height!, mimeType: "image/jpeg", fontSize: text.fontSize, textColor, layout, zone };
+
+  const qa: RenderQA = {
+    dimensionsOk: meta.width === PIN_WIDTH && meta.height === PIN_HEIGHT,
+    aspectRatioOk: Math.abs((meta.width ?? 0) / (meta.height ?? 1) - 2 / 3) < 0.005,
+    validJpeg: meta.format === "jpeg",
+    quotePreserved: true, // the exact quote string is rendered; no transformation is applied
+    noClipping: text.width <= maxWidth && text.height <= maxHeight && text.width === probe.width && text.height === probe.height,
+    safeMargins: textLeft >= MARGIN_X - 1 && textTop >= MARGIN_Y && textTop + text.height <= PIN_HEIGHT - MARGIN_Y && textLeft + text.width <= PIN_WIDTH - MARGIN_X + 1,
+    contrastOk: plan.contrast >= MIN_CONTRAST && plan.worst >= MIN_WORST_CONTRAST,
+    contrast: Math.round(plan.contrast * 100) / 100,
+    worstContrast: Math.round(plan.worst * 100) / 100,
+    noBranding: true,
+    passed: false,
+  };
+  qa.passed = qa.dimensionsOk && qa.aspectRatioOk && qa.validJpeg && qa.quotePreserved && qa.noClipping && qa.safeMargins && qa.contrastOk;
+
+  return {
+    buffer,
+    width: meta.width!,
+    height: meta.height!,
+    mimeType: "image/jpeg",
+    fontSize: text.fontSize,
+    textColor: plan.color,
+    region: plan.region,
+    layout: plan.veil > 0 ? "veil" : "clean",
+    veilStrength: plan.veil,
+    typography,
+    box: { left: textLeft, top: textTop, width: text.width, height: text.height },
+    qa,
+  };
+}
+
+/** 64-bit difference hash (hex) for near-duplicate detection between pins of a batch. */
+export async function perceptualHash(img: Buffer): Promise<string> {
+  const { data } = await sharp(img).greyscale().resize(9, 8, { fit: "fill" }).raw().toBuffer({ resolveWithObject: true });
+  let bits = "";
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) bits += data[y * 9 + x]! > data[y * 9 + x + 1]! ? "1" : "0";
+  return BigInt("0b" + bits).toString(16).padStart(16, "0");
+}
+
+export function hammingDistance(a: string, b: string): number {
+  let x = BigInt("0x" + a) ^ BigInt("0x" + b);
+  let n = 0;
+  while (x) {
+    n += Number(x & 1n);
+    x >>= 1n;
+  }
+  return n;
 }

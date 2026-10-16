@@ -79,6 +79,7 @@ export const users = pgTable("users", {
 
 export type PendingAction =
   | { kind: "choose_count"; topic: string }
+  | { kind: "choose_style"; topic: string; count: number }
   | { kind: "edit_quote" | "edit_title" | "edit_description" | "edit_link"; draftId: string; version: number }
   | { kind: "schedule_start"; batchId: string; intervalMinutes: number }
   | { kind: "reschedule_start"; batchId: string }
@@ -94,8 +95,9 @@ export const userSettings = pgTable("user_settings", {
   tone: text("tone").notNull().default("emotional"),
   quoteLength: text("quote_length").notNull().default("medium"),
   defaultImageStyle: text("default_image_style").notNull().default("auto"),
-  typographyPreset: text("typography_preset").notNull().default("elegant_serif"),
-  imageQuality: integer("image_quality").notNull().default(88),
+  /** "style" = use each style's own typography (V2 default); otherwise a fixed preset for every pin. */
+  typographyPreset: text("typography_preset").notNull().default("style"),
+  imageQuality: integer("image_quality").notNull().default(91),
   defaultBatchSize: integer("default_batch_size").notNull().default(5),
   defaultIntervalMinutes: integer("default_interval_minutes").notNull().default(60),
   defaultBoardAssignmentMode: boardAssignmentMode("default_board_assignment_mode").notNull().default("AUTO"),
@@ -166,6 +168,8 @@ export const pinBatches = pgTable(
     requestedCount: integer("requested_count").notNull(),
     generatedCount: integer("generated_count").notNull().default(0),
     boardAssignmentMode: boardAssignmentMode("board_assignment_mode").notNull().default("AUTO"),
+    /** Style chosen before generation: a style id, or "auto" (AI picks per pin). */
+    imageStyle: text("image_style").notNull().default("auto"),
     status: batchStatus("status").notNull().default("CREATED"),
     /** Proposed (not yet confirmed) schedule shown to the user for final approval. */
     schedulePlan: jsonb("schedule_plan").$type<SchedulePlan | null>(),
@@ -235,6 +239,12 @@ export const imageAssets = pgTable(
     assetType: assetType("asset_type").notNull(),
     imageStyle: text("image_style"),
     generationPrompt: text("generation_prompt"),
+    styleVersion: integer("style_version"),
+    /** True when the AI image failed and a procedural style-palette gradient was used (never auto-approved). */
+    isFallback: boolean("is_fallback").notNull().default(false),
+    /** 64-bit dHash used to catch near-identical backgrounds within a batch. */
+    phash: text("phash"),
+    qa: jsonb("qa").$type<Record<string, unknown> | null>(),
     width: integer("width").notNull(),
     height: integer("height").notNull(),
     mimeType: text("mime_type").notNull(),

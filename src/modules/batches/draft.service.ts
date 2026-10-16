@@ -116,6 +116,8 @@ export async function approveAll(userId: string, batchId: string) {
   const approved: number[] = [];
   const missingBoard: number[] = [];
   const notReady: number[] = [];
+  /** Pins on a procedural fallback background are never bulk-approved; they need an explicit individual approval. */
+  const fallback: number[] = [];
   for (const d of drafts) {
     if (d.status === "CANCELLED" || d.approvalStatus === "REJECTED") continue;
     if (d.status === "APPROVED") {
@@ -126,6 +128,10 @@ export async function approveAll(userId: string, batchId: string) {
       notReady.push(d.position);
       continue;
     }
+    if ((await getFinalImage(d))?.isFallback) {
+      fallback.push(d.position);
+      continue;
+    }
     if (!d.selectedBoardId) {
       missingBoard.push(d.position);
       continue;
@@ -133,7 +139,7 @@ export async function approveAll(userId: string, batchId: string) {
     await approveDraft(userId, d.id, d.version);
     approved.push(d.position);
   }
-  return { approved, missingBoard, notReady };
+  return { approved, missingBoard, notReady, fallback };
 }
 
 export async function getFinalImage(d: PinDraft, tx: DbOrTx = db) {

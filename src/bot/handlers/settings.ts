@@ -13,20 +13,22 @@ const cycle = <T>(list: readonly T[], cur: T): T => list[(list.indexOf(cur) + 1)
 
 const STYLE_CYCLE = ["auto", ...IMAGE_STYLE_KEYS] as const;
 const LENGTHS = ["short", "medium", "long"] as const;
-const QUALITIES = [80, 88, 95] as const;
+const QUALITIES = [90, 91, 92] as const;
+const TYPO_CYCLE = ["style", ...TYPOGRAPHY_KEYS] as const;
 const SIZES = [1, 3, 5, 7] as const;
 const MODES = ["AUTO", "MANUAL", "UNIQUE"] as const;
 
 function settingsText(s: UserSettings, tz: string, preferredBoard?: string | null) {
   const style = s.defaultImageStyle === "auto" ? "Auto (AI picks)" : isImageStyle(s.defaultImageStyle) ? IMAGE_STYLES[s.defaultImageStyle].label : s.defaultImageStyle;
-  const typo = isTypographyPreset(s.typographyPreset) ? TYPOGRAPHY_PRESETS[s.typographyPreset].label : s.typographyPreset;
+  // (the default is pre-marked in the style picker shown before every new batch)
+  const typo = isTypographyPreset(s.typographyPreset) ? TYPOGRAPHY_PRESETS[s.typographyPreset].label : "Matches each style";
   return [
     "⚙️ <b>Settings</b> (tap to change)",
     "",
     "<b>Image</b>",
-    `Style: ${escapeHtml(style)} · Typography: ${escapeHtml(typo)}`,
+    `Default style: ${escapeHtml(style)} · Typography: ${escapeHtml(typo)}`,
     `Quote length: ${s.quoteLength} · JPEG quality: ${s.imageQuality}`,
-    `Watermark: ${s.watermarkEnabled ? `on (${escapeHtml(s.watermarkText || "@username")})` : "off"} · Variations per pin: 1`,
+    "Clean pins: no logo, watermark or footer — only your quote.",
     "",
     "<b>AI</b>",
     `Language: ${escapeHtml(s.defaultLanguage)} · Tone: ${escapeHtml(s.tone)}`,
@@ -49,8 +51,6 @@ function settingsKeyboard() {
     .text("📏 Length", cb("set", "len"))
     .row()
     .text("🖼 Quality", cb("set", "q"))
-    .text("💧 Watermark", cb("set", "wm"))
-    .text("✏️ WM text", cb("set", "wmt"))
     .row()
     .text("🌐 Language", cb("set", "lang"))
     .text("🎭 Tone", cb("set", "tone"))
@@ -90,7 +90,7 @@ export async function handleSettingsCallback(ctx: BotContext, p: ParsedCallback)
     return showSettings(ctx, true);
   }
   const key = p.args[0];
-  const ask = async (k: "timezone" | "watermarkText" | "defaultLink" | "defaultLanguage" | "tone", prompt: string) => {
+  const ask = async (k: "timezone" | "defaultLink" | "defaultLanguage" | "tone", prompt: string) => {
     await setPendingAction(uid, { kind: "setting_text", key: k });
     await ctx.reply(prompt, { parse_mode: "HTML" });
   };
@@ -99,16 +99,13 @@ export async function handleSettingsCallback(ctx: BotContext, p: ParsedCallback)
       await updateSettings(uid, { defaultImageStyle: cycle(STYLE_CYCLE as readonly string[], s.defaultImageStyle) });
       break;
     case "typo":
-      await updateSettings(uid, { typographyPreset: cycle(TYPOGRAPHY_KEYS as readonly string[], s.typographyPreset) });
+      await updateSettings(uid, { typographyPreset: cycle(TYPO_CYCLE as readonly string[], s.typographyPreset) });
       break;
     case "len":
       await updateSettings(uid, { quoteLength: cycle(LENGTHS as readonly string[], s.quoteLength) });
       break;
     case "q":
-      await updateSettings(uid, { imageQuality: cycle(QUALITIES as readonly number[], s.imageQuality as 80) });
-      break;
-    case "wm":
-      await updateSettings(uid, { watermarkEnabled: !s.watermarkEnabled });
+      await updateSettings(uid, { imageQuality: cycle(QUALITIES as readonly number[], s.imageQuality as 91) });
       break;
     case "notif":
       await updateSettings(uid, { notificationsEnabled: !s.notificationsEnabled });
@@ -122,8 +119,6 @@ export async function handleSettingsCallback(ctx: BotContext, p: ParsedCallback)
     case "mode":
       await updateSettings(uid, { defaultBoardAssignmentMode: cycle(MODES, s.defaultBoardAssignmentMode) });
       break;
-    case "wmt":
-      return ask("watermarkText", "💧 Send the watermark text (max 40 characters), e.g. <code>@yourbrand</code>.");
     case "lang":
       return ask("defaultLanguage", "🌐 Send the language for quotes and SEO text, e.g. <code>English</code> or <code>Bangla</code>.");
     case "tone":

@@ -31,7 +31,8 @@ export interface LayoutOptions {
   balance?: boolean;
 }
 
-async function renderAt(o: LayoutOptions, size: number): Promise<TextLayout> {
+/** Renders at an exact size and wrap width (use a layout's fontSize + boxWidth to reproduce identical line breaks). */
+export async function renderAt(o: LayoutOptions, size: number): Promise<TextLayout> {
   const p: { file: string; family: string; lineSpacing: number; letterSpacing?: number } = TYPOGRAPHY_PRESETS[o.preset];
   const tracking = o.letterSpacing ?? p.letterSpacing ?? 0;
   const ls = tracking ? ` letter_spacing="${Math.round(size * tracking * 1024)}"` : "";
@@ -65,7 +66,10 @@ export async function layoutText(o: LayoutOptions): Promise<TextLayout> {
   let best: TextLayout | null = null;
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
-    const r = await renderAt(o, mid);
+    // Wrap slightly inside the box: italic overhang can make Pango's block a few px wider than the wrap width,
+    // which would otherwise make the size search non-monotonic and pick a needlessly small font.
+    const pad = Math.ceil(mid * 0.12);
+    const r = await renderAt({ ...o, maxWidth: o.maxWidth - pad }, mid);
     if (r.width <= o.maxWidth && r.height <= o.maxHeight) {
       best = r;
       lo = mid + 1;
@@ -84,20 +88,36 @@ export async function layoutText(o: LayoutOptions): Promise<TextLayout> {
 async function balanceLines(o: LayoutOptions, base: TextLayout): Promise<TextLayout> {
   let best = base;
   const minWidth = Math.round(o.maxWidth * 0.55);
-  for (let w = o.maxWidth - 24; w >= minWidth; w -= 24) {
+  for (let w = base.boxWidth - 24; w >= minWidth; w -= 24) {
     const r = await renderAt({ ...o, maxWidth: w }, base.fontSize);
-    if (r.height > base.height || r.width > w) break;
+    if (r.height > base.height || r.width > o.maxWidth) break;
     best = r;
   }
   return best;
 }
 
-/** Suggested max font size so short quotes don't become billboard-sized. */
+const wordCount = (text: string) => text.trim().split(/\s+/).filter(Boolean).length;
+
+/**
+ * Style system V2 sizing (Cormorant-equivalent px, scaled per typeface):
+ * ≤8 words 94–110px · 9–18 words 75–94px · 19–30 words 60–75px · longer quotes 48–60px.
+ * Within a band, more words → smaller ceiling, so lines stay balanced and calm.
+ */
+export function fontBandFor(text: string): { min: number; max: number } {
+  const w = wordCount(text);
+  if (w <= 8) return { min: 94, max: Math.round(110 - Math.max(0, w - 3) * 3) };
+  if (w <= 18) return { min: 75, max: Math.round(94 - (w - 9) * 1.5) };
+  if (w <= 30) return { min: 60, max: Math.round(75 - (w - 19) * 1.0) };
+  return { min: 48, max: 60 };
+}
+
 export function maxFontSizeFor(text: string, preset: TypographyPreset): number {
-  const words = text.trim().split(/\s+/).length;
-  // Editorial sizing: generous but never billboard-like; long quotes get smaller, calmer type.
-  const base = words <= 6 ? 76 : words <= 12 ? 64 : words <= 20 ? 56 : words <= 30 ? 48 : 42;
-  return Math.round(base * TYPOGRAPHY_PRESETS[preset].sizeScale);
+  return Math.round(fontBandFor(text).max * TYPOGRAPHY_PRESETS[preset].sizeScale);
+}
+
+/** Lowest size we accept before shrinking further into the next band; never below 40px. */
+export function minFontSizeFor(text: string, preset: TypographyPreset): number {
+  return Math.max(40, Math.round((fontBandFor(text).min - 30) * TYPOGRAPHY_PRESETS[preset].sizeScale));
 }
 
 export class TextOverflowError extends Error {}

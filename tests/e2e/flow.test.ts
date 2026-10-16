@@ -8,7 +8,7 @@ import type { Worker } from "bullmq";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { db } from "../../src/config/database";
 import { createRedisConnection } from "../../src/config/redis";
-import { pinBatches, pinDrafts, pinSchedules, publishJobs, users } from "../../src/db/schema";
+import { imageAssets, pinBatches, pinDrafts, pinSchedules, publishJobs, users } from "../../src/db/schema";
 import { exchangeCodeAndStore } from "../../src/modules/pinterest/oauth.service";
 import { publishSchedule, reconcileUnknown, RECONCILE_MAX_ATTEMPTS } from "../../src/modules/publishing/publishing.service";
 import { reconcileSchedules } from "../../src/modules/scheduling/reconciliation.service";
@@ -76,6 +76,10 @@ describe("full Telegram → Pinterest flow", () => {
 
   it("generates a 3-pin batch from natural language, previews it and auto-assigns boards", async () => {
     await tg.send("3 heartbreak, betrayal and healing");
+    // Style is chosen before anything is generated.
+    expect(tg.lastText()).toContain("Choose a style");
+    expect(await db.select().from(pinBatches)).toHaveLength(0);
+    await tg.click(tg.button("Auto"));
     expect(tg.lastText()).toContain("Generating 3 Pinterest quote Pins");
     const batch = await waitFor(async () => {
       const [b] = await db.select().from(pinBatches).orderBy(asc(pinBatches.createdAt));
@@ -245,5 +249,21 @@ describe("full Telegram → Pinterest flow", () => {
     await tg.send("/history");
     expect(tg.lastText()).toContain("Published pins");
     expect(tg.lastText()).toContain("pinterest.com/pin/");
+  });
+
+  it("uses the manually selected style for every pin and renders without branding", async () => {
+    await tg.send("/create self respect and boundaries");
+    await tg.click(tg.button("Minimal Typography"));
+    const batch = await waitFor(async () => {
+      const rows = await db.select().from(pinBatches).orderBy(asc(pinBatches.createdAt));
+      const b = rows.at(-1);
+      return b && b.id !== batchId && b.readyNotifiedAt ? b : null;
+    });
+    expect(batch.imageStyle).toBe("minimal_typography");
+    const [d] = await draftsOf(batch.id);
+    expect(d!.imageStyle).toBe("minimal_typography");
+    const img = await db.query.imageAssets.findFirst({ where: eq(imageAssets.id, d!.selectedImageId!) });
+    expect(img!.styleVersion).toBe(2);
+    expect((img!.qa as { noBranding: boolean }).noBranding).toBe(true);
   });
 });

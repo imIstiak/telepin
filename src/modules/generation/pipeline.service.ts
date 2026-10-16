@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import { db } from "../../config/database";
 import { errMessage, logger } from "../../config/logger";
 import { imageAssets, pinBatches, pinDrafts, type PinDraft } from "../../db/schema";
@@ -10,11 +10,11 @@ import { listBatchDrafts, recentQuotes } from "../batches/draft.service";
 import { autoAssignBoards, refreshBatchStatus } from "../batches/batch.service";
 import { ensureBoards } from "../pinterest/boards.service";
 import { getAccount } from "../pinterest/oauth.service";
-import { renderQuoteImage } from "../images/renderer.service";
-import { buildBackgroundPrompt, isImageStyle, isTypographyPreset, type ImageStyle } from "../images/styles";
+import { hammingDistance, perceptualHash, renderQuoteImage } from "../images/renderer.service";
+import { buildBackgroundPrompt, isImageStyle, isTypographyPreset, resolveStyle, STYLE_SYSTEM_VERSION, suggestStyle, type ImageStyle } from "../images/styles";
 import { notifier } from "../notifications/notifier";
 import { buildObjectKey, getStorage } from "../storage/r2.service";
-import { getSettings, getUser } from "../users/user.service";
+import { getSettings } from "../users/user.service";
 
 export class StaleJobError extends Error {}
 
@@ -24,13 +24,31 @@ async function loadGenerating(draftId: string, version: number): Promise<PinDraf
   return d;
 }
 
-function quoteOptions(settings: Awaited<ReturnType<typeof getSettings>>) {
+/** Max AI backgrounds per pin version (first try + one automatic retry for poor contrast / near-duplicates). */
+export const MAX_BACKGROUND_ATTEMPTS = 2;
+/** dHash distance at or below which two backgrounds in a batch count as near-identical. */
+export const NEAR_DUPLICATE_DISTANCE = 6;
+
+function quoteOptions(settings: Awaited<ReturnType<typeof getSettings>>, style: unknown) {
   return {
     language: settings.defaultLanguage,
     tone: settings.tone,
     quoteLength: (["short", "medium", "long"].includes(settings.quoteLength) ? settings.quoteLength : "medium") as QuoteLength,
-    imageStyle: (isImageStyle(settings.defaultImageStyle) ? settings.defaultImageStyle : "auto") as ImageStyle | "auto",
+    // The style chosen before generation (batch level) always overrides the AI; "auto" = AI chooses semantically.
+    imageStyle: (isImageStyle(style) ? style : "auto") as ImageStyle | "auto",
   };
+}
+
+async function backgroundAttempts(draftId: string, version: number) {
+  const rows = await db
+    .select({ id: imageAssets.id })
+    .from(imageAssets)
+    .where(and(eq(imageAssets.draftId, draftId), eq(imageAssets.version, version), eq(imageAssets.assetType, "BACKGROUND")));
+  return rows.length;
+}
+
+async function enqueueBackgroundRetry(d: PinDraft, version: number, notify: "batch" | "draft", attempt: number) {
+  await getQueues().background.add("bg", { draftId: d.id, version, notify }, { jobId: `bg-${d.id}-v${version}-a${attempt}` });
 }
 
 /** content-generation (batch): quotes + SEO for every pending draft in one model call, then fan out image jobs. */
@@ -45,7 +63,7 @@ export async function runBatchContent(batchId: string) {
     topic: batch.originalTopic,
     count: drafts.length,
     existingQuotes: await recentQuotes(batch.userId),
-    ...quoteOptions(settings),
+    ...quoteOptions(settings, batch.imageStyle),
   });
 
   for (const [i, d] of drafts.entries()) {
@@ -103,8 +121,7 @@ export async function runRewrite(draftId: string, version: number, thenBackgroun
   const item = await svc.rewriteOne({
     topic: d.topic,
     existingQuotes: [...siblings, ...(await recentQuotes(d.userId))],
-    ...quoteOptions(settings),
-    imageStyle: isImageStyle(d.imageStyle) ? d.imageStyle : "auto",
+    ...quoteOptions(settings, d.imageStyle),
   });
   await db
     .update(pinDrafts)
@@ -126,10 +143,15 @@ export async function runRewrite(draftId: string, version: number, thenBackgroun
 export async function runBackground(job: BackgroundJob, isFinalAttempt: boolean) {
   const d = await loadGenerating(job.draftId, job.version);
   if (!d) return;
-  const style: ImageStyle = isImageStyle(d.imageStyle) ? d.imageStyle : "dark_cinematic";
-  const prompt = buildBackgroundPrompt(style, d.backgroundPrompt);
+  const style: ImageStyle = resolveStyle(d.imageStyle, suggestStyle(`${d.topic} ${d.quote ?? ""}`));
+  const attempt = await backgroundAttempts(d.id, d.version);
+  // Different lighting/framing/material per pin (and per retry) so a batch never looks copy-pasted.
+  const variant = d.position - 1 + attempt * 3 + (d.version - 1);
+  const prompt = buildBackgroundPrompt(style, d.backgroundPrompt, variant);
+  const tag = `[style:${style} system:v${STYLE_SYSTEM_VERSION} variant:${variant}]`;
   let buffer: Buffer;
-  let usedPrompt = prompt;
+  let usedPrompt = `${tag} ${prompt}`;
+  let isFallback = false;
   try {
     buffer = await getImageProvider().generateBackground(prompt, { style });
   } catch (e) {
@@ -137,17 +159,24 @@ export async function runBackground(job: BackgroundJob, isFinalAttempt: boolean)
     if (!isFinalAttempt && !permanent) throw e;
     logger.warn({ draftId: d.id, err: errMessage(e) }, "AI background failed on final attempt; using procedural fallback");
     buffer = await gradientFallback().generateBackground(prompt, { style });
-    usedPrompt = `[fallback:procedural-gradient after AI error: ${errMessage(e).slice(0, 200)}] ${prompt}`;
+    usedPrompt = `[fallback:procedural-gradient after AI error: ${errMessage(e).slice(0, 200)}] ${tag} ${prompt}`;
+    isFallback = true;
   }
   const storage = getStorage();
   const key = buildObjectKey({ userId: d.userId, batchId: d.batchId, draftId: d.id, kind: "background", version: d.version, ext: "png" });
   const { prepareBackground } = await import("../images/renderer.service");
   const prepared = await prepareBackground(buffer);
-  const stored = await storage.put(key, prepared, "image/png");
+  const phash = await perceptualHash(prepared);
+  const stored = await storage.put(key.replace(/\.png$/, attempt ? `-a${attempt}.png` : ".png"), prepared, "image/png");
   const [asset] = await db
     .insert(imageAssets)
-    .values({ draftId: d.id, objectKey: stored.objectKey, publicUrl: stored.publicUrl, assetType: "BACKGROUND", imageStyle: style, generationPrompt: usedPrompt, width: 1000, height: 1500, mimeType: "image/png", version: d.version })
+    .values({ draftId: d.id, objectKey: stored.objectKey, publicUrl: stored.publicUrl, assetType: "BACKGROUND", imageStyle: style, styleVersion: STYLE_SYSTEM_VERSION, isFallback, phash, generationPrompt: usedPrompt, width: 1000, height: 1500, mimeType: "image/png", version: d.version })
     .returning();
+  // Batch variation check: if this background is nearly identical to a sibling's, try once more with another variant.
+  if (!isFallback && attempt + 1 < MAX_BACKGROUND_ATTEMPTS && (await nearDuplicateInBatch(d, phash))) {
+    logger.info({ draftId: d.id }, "Background nearly identical to another pin in the batch; regenerating with a new variation");
+    return enqueueBackgroundRetry(d, job.version, job.notify, attempt + 1);
+  }
   const [u] = await db
     .update(pinDrafts)
     .set({ backgroundImageId: asset!.id })
@@ -155,6 +184,17 @@ export async function runBackground(job: BackgroundJob, isFinalAttempt: boolean)
     .returning();
   if (!u) return;
   await getQueues().render.add("render", { draftId: d.id, version: job.version, notify: job.notify }, { jobId: `render-${d.id}-v${job.version}` });
+}
+
+async function nearDuplicateInBatch(d: PinDraft, phash: string): Promise<boolean> {
+  const siblings = await db
+    .select({ phash: imageAssets.phash })
+    .from(imageAssets)
+    .innerJoin(pinDrafts, eq(pinDrafts.id, imageAssets.draftId))
+    .where(and(eq(pinDrafts.batchId, d.batchId), ne(pinDrafts.id, d.id), eq(imageAssets.assetType, "BACKGROUND")))
+    .orderBy(desc(imageAssets.createdAt))
+    .limit(50);
+  return siblings.some((s) => s.phash && hammingDistance(s.phash, phash) <= NEAR_DUPLICATE_DISTANCE);
 }
 
 /** image-rendering: quote typography over the background → final JPEG → storage → ready for review. */
@@ -165,18 +205,25 @@ export async function runRender(job: RenderJob) {
   const bgAsset = await db.query.imageAssets.findFirst({ where: eq(imageAssets.id, d.backgroundImageId) });
   if (!bgAsset) throw new Error("Background asset missing");
   const settings = await getSettings(d.userId);
-  const user = await getUser(d.userId);
   const storage = getStorage();
   const background = await storage.get(bgAsset.objectKey);
-  const style: ImageStyle = isImageStyle(d.imageStyle) ? d.imageStyle : "dark_cinematic";
-  const typography = isTypographyPreset(d.typography) ? d.typography : "elegant_serif";
-  const watermark = settings.watermarkEnabled ? settings.watermarkText || (user?.telegramUsername ? `@${user.telegramUsername}` : null) : null;
-  const out = await renderQuoteImage({ background, quote: d.quote, style, typography, watermark, quality: settings.imageQuality });
+  const style: ImageStyle = resolveStyle(bgAsset.imageStyle ?? d.imageStyle);
+  // null typography → the style's own typeface; an explicit per-pin/settings preset overrides it.
+  const typography = isTypographyPreset(d.typography) ? d.typography : null;
+  const quality = Math.min(92, Math.max(90, settings.imageQuality));
+  const out = await renderQuoteImage({ background, quote: d.quote, style, typography, quality });
+  if (!out.qa.contrastOk && !bgAsset.isFallback) {
+    const attempts = await backgroundAttempts(d.id, d.version);
+    if (attempts < MAX_BACKGROUND_ATTEMPTS) {
+      logger.info({ draftId: d.id, contrast: out.qa.contrast }, "Quote contrast too low on every region; regenerating the background");
+      return enqueueBackgroundRetry(d, job.version, job.notify, attempts);
+    }
+  }
   const key = buildObjectKey({ userId: d.userId, batchId: d.batchId, draftId: d.id, kind: "final", version: d.version, ext: "jpg" });
   const stored = await storage.put(key, out.buffer, out.mimeType);
   const [asset] = await db
     .insert(imageAssets)
-    .values({ draftId: d.id, objectKey: stored.objectKey, publicUrl: stored.publicUrl, assetType: "FINAL", imageStyle: style, generationPrompt: bgAsset.generationPrompt, width: out.width, height: out.height, mimeType: out.mimeType, version: d.version })
+    .values({ draftId: d.id, objectKey: stored.objectKey, publicUrl: stored.publicUrl, assetType: "FINAL", imageStyle: style, styleVersion: STYLE_SYSTEM_VERSION, isFallback: bgAsset.isFallback, phash: bgAsset.phash, qa: { ...out.qa, region: out.region, layout: out.layout, veil: out.veilStrength, fontSize: out.fontSize, textColor: out.textColor, typography: out.typography }, generationPrompt: bgAsset.generationPrompt, width: out.width, height: out.height, mimeType: out.mimeType, version: d.version })
     .returning();
   const [u] = await db
     .update(pinDrafts)

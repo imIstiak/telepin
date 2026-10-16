@@ -4,7 +4,9 @@ import { db } from "../config/database";
 import { errMessage } from "../config/logger";
 import { pinDrafts, pinSchedules, type PinBatch, type PinDraft } from "../db/schema";
 import { getQueues } from "../queues";
-import { autoAssignBoards, createBatch, getOwnedBatch, listBatches } from "../modules/batches/batch.service";
+import { autoAssignBoards, createBatch, getOwnedBatch, listBatches, validateCount, validateTopic } from "../modules/batches/batch.service";
+import { IMAGE_STYLES, type ImageStyle } from "../modules/images/styles";
+import { getSettings, setPendingAction } from "../modules/users/user.service";
 import { getOwnedDraft, listBatchDrafts } from "../modules/batches/draft.service";
 import { ensureBoards } from "../modules/pinterest/boards.service";
 import { proposePlan, upcomingQueue } from "../modules/scheduling/schedule.service";
@@ -12,13 +14,26 @@ import { clampText, escapeHtml } from "../utils/text";
 import { formatLocal, minutesLabel } from "../utils/time";
 import { cb } from "./callbacks";
 import type { BotContext } from "./context";
-import { boardPickerKeyboard, queueBatchKeyboard, scheduleConfirmKeyboard } from "./keyboards";
+import { boardPickerKeyboard, newBatchStyleKeyboard, queueBatchKeyboard, scheduleConfirmKeyboard } from "./keyboards";
 import { boardNames, scheduleReviewText, sendBatchSummary, sendDraftCard } from "./presenters";
 
-export async function startGeneration(ctx: BotContext, topic: string, count: number) {
-  const batch = await createBatch(ctx.user.id, topic, count);
+/** Step before generation: let the user choose a visual style (or Auto). Nothing is generated until they pick. */
+export async function askStyle(ctx: BotContext, topic: string, count: number) {
+  validateTopic(topic);
+  validateCount(count);
+  await setPendingAction(ctx.user.id, { kind: "choose_style", topic, count });
+  const s = await getSettings(ctx.user.id);
   await ctx.reply(
-    `⏳ Generating ${count} Pinterest quote Pin${count === 1 ? "" : "s"} for “${escapeHtml(clampText(topic, 80))}” (Batch #${batch.number}). Please wait — I'll send the previews here.`,
+    `🎨 <b>Choose a style</b> for ${count} Pin${count === 1 ? "" : "s"} about “${escapeHtml(clampText(topic, 80))}”\n\n<i>Auto</i> lets the AI match each quote's emotion to the best style. A style you pick is used for every Pin in this batch.`,
+    { parse_mode: "HTML", reply_markup: newBatchStyleKeyboard(s.defaultImageStyle) },
+  );
+}
+
+export async function startGeneration(ctx: BotContext, topic: string, count: number, style: ImageStyle | "auto" = "auto") {
+  const batch = await createBatch(ctx.user.id, topic, count, style);
+  const styleLabel = style === "auto" ? "✨ Auto style" : `${IMAGE_STYLES[style].emoji} ${IMAGE_STYLES[style].label}`;
+  await ctx.reply(
+    `⏳ Generating ${count} Pinterest quote Pin${count === 1 ? "" : "s"} for “${escapeHtml(clampText(topic, 80))}” · ${styleLabel} (Batch #${batch.number}). Please wait — I'll send the previews here.`,
     { parse_mode: "HTML" },
   );
 }

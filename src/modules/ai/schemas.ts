@@ -12,7 +12,8 @@ export const QuoteItemSchema = z.object({
   description: z.string().min(20).max(1200),
   keywords: z.array(z.string().min(2).max(60)).min(2).max(12),
   alt_text: z.string().min(10).max(700),
-  style: z.enum(IMAGE_STYLE_KEYS as [string, ...string[]]),
+  /** One of IMAGE_STYLE_KEYS; validated/normalised after parsing so a legacy or unknown id never fails the batch. */
+  style: z.string().min(1).max(60).describe(`One of: ${IMAGE_STYLE_KEYS.join(", ")}`),
   background_prompt: z.string().min(10).max(600),
 });
 export type QuoteItem = z.infer<typeof QuoteItemSchema>;

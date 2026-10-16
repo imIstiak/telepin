@@ -5,7 +5,7 @@ import { db } from "../config/database";
 import { imageAssets, pinterestBoards, type PinBatch, type PinDraft } from "../db/schema";
 import { listBatchDrafts } from "../modules/batches/draft.service";
 import { getAccount } from "../modules/pinterest/oauth.service";
-import { IMAGE_STYLES, isImageStyle } from "../modules/images/styles";
+import { styleConfig } from "../modules/images/styles";
 import { getStorage } from "../modules/storage/r2.service";
 import { clampText, escapeHtml } from "../utils/text";
 import { formatLocal, minutesLabel, buildTimeline } from "../utils/time";
@@ -66,7 +66,10 @@ export async function draftCaption(d: PinDraft, header?: string): Promise<string
   const batch = await db.query.pinBatches.findFirst({ where: (t, { eq: e }) => e(t.id, d.batchId) });
   const names = await boardNames([d.selectedBoardId]);
   const board = d.selectedBoardId ? `${escapeHtml(names.get(d.selectedBoardId) ?? "?")}${d.boardReason ? ` <i>(${escapeHtml(clampText(d.boardReason, 80))})</i>` : ""}` : "<i>not assigned</i>";
-  const style = isImageStyle(d.imageStyle) ? IMAGE_STYLES[d.imageStyle].label : d.imageStyle ?? "—";
+  const sc = d.imageStyle ? styleConfig(d.imageStyle) : null;
+  const style = sc ? `${sc.emoji} ${sc.label}` : "—";
+  const img = d.selectedImageId ? await db.query.imageAssets.findFirst({ where: eq(imageAssets.id, d.selectedImageId) }) : null;
+  const qa = img?.qa as { contrastOk?: boolean } | null | undefined;
   const parts = [
     header ? `<b>${escapeHtml(header)}</b>` : null,
     `<b>Pin ${d.position}/${batch?.requestedCount ?? "?"}</b> · Batch #${batch?.number ?? "?"} · ${statusLabel(d.status)}`,
@@ -76,6 +79,8 @@ export async function draftCaption(d: PinDraft, header?: string): Promise<string
     `<b>Board:</b> ${board}`,
     d.link ? `<b>Link:</b> ${escapeHtml(clampText(d.link, 80))}` : null,
     `<b>Style:</b> ${escapeHtml(style)} · v${d.version}`,
+    img?.isFallback ? "⚠️ <b>Fallback background</b> — the AI image failed, so a plain style-colour background was used. Regenerate the background, or approve this pin individually (it's excluded from Approve All)." : null,
+    qa && qa.contrastOk === false ? "⚠️ Text contrast is lower than ideal on this background — consider Regenerate → background." : null,
     d.lastError ? `⚠️ ${escapeHtml(clampText(d.lastError, 200))}` : null,
   ].filter((x): x is string => x !== null);
   // Telegram photo captions are limited to 1024 characters.

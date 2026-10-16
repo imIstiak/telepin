@@ -6,11 +6,12 @@ import { changeDraft, getOwnedDraft } from "../../modules/batches/draft.service"
 import { validateCount } from "../../modules/batches/batch.service";
 import { rescheduleBatch } from "../../modules/scheduling/schedule.service";
 import { setPendingAction, setTimezone, updateSettings } from "../../modules/users/user.service";
-import { cleanQuote, escapeHtml } from "../../utils/text";
+import { escapeHtml } from "../../utils/text";
 import { formatLocal, isValidTimezone, parseUserDateTime } from "../../utils/time";
 import type { BotContext } from "../context";
-import { enqueueRegeneration, showScheduleReview, startGeneration } from "../flows";
-import { countKeyboard } from "../keyboards";
+import { askStyle, enqueueRegeneration, showScheduleReview, startGeneration } from "../flows";
+import { IMAGE_STYLES, IMAGE_STYLE_KEYS } from "../../modules/images/styles";
+import { countKeyboard, newBatchStyleKeyboard } from "../keyboards";
 import { sendDraftCard } from "../presenters";
 import { showSettings } from "./settings";
 
@@ -53,10 +54,23 @@ async function handlePending(ctx: BotContext, pending: PendingAction, text: stri
       }
       validateCount(n);
       await setPendingAction(uid, null);
-      return startGeneration(ctx, pending.topic, n);
+      return askStyle(ctx, pending.topic, n);
+    }
+    case "choose_style": {
+      const t = text.trim().toLowerCase();
+      const idx = Number(t);
+      const byName = IMAGE_STYLE_KEYS.find((k) => k === t.replace(/\s+/g, "_") || IMAGE_STYLES[k].label.toLowerCase() === t);
+      const style = t === "auto" ? "auto" : byName ?? (Number.isInteger(idx) && idx >= 1 && idx <= IMAGE_STYLE_KEYS.length ? IMAGE_STYLE_KEYS[idx - 1]! : null);
+      if (!style) {
+        await ctx.reply("Please tap a style button (or /cancel):", { reply_markup: newBatchStyleKeyboard() });
+        return;
+      }
+      await setPendingAction(uid, null);
+      return startGeneration(ctx, pending.topic, pending.count, style);
     }
     case "edit_quote": {
-      const q = cleanQuote(text);
+      // The user's quote is preserved exactly (punctuation, quotes, emphasis) — only whitespace is normalised.
+      const q = text.replace(/\s+/g, " ").trim();
       if (q.length < 3 || q.length > 300) {
         await ctx.reply("A quote must be 3–300 characters. Send it again, or /cancel.");
         return;
@@ -131,8 +145,6 @@ async function handlePending(ctx: BotContext, pending: PendingAction, text: stri
           return;
         }
         await updateSettings(uid, { defaultLink: none ? null : v });
-      } else if (pending.key === "watermarkText") {
-        await updateSettings(uid, { watermarkText: v.slice(0, 40), watermarkEnabled: true });
       } else if (pending.key === "defaultLanguage") {
         await updateSettings(uid, { defaultLanguage: v.slice(0, 40) });
       } else if (pending.key === "tone") {
@@ -163,7 +175,7 @@ export function registerText(bot: Composer<BotContext>) {
         await ctx.reply(`I can create 1–${env.MAX_BATCH_SIZE} pins per batch.`);
         return;
       }
-      return startGeneration(ctx, topic, count);
+      return askStyle(ctx, topic, count);
     }
     if (topic.length > 200) {
       await ctx.reply("That's a bit long for a topic — please send a few keywords (max 200 characters).");

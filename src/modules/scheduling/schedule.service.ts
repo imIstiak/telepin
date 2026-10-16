@@ -16,7 +16,7 @@ import {
 import { getQueues, publishJobId } from "../../queues";
 import { audit } from "../audit/audit.service";
 import { getOwnedBatch, refreshBatchStatus } from "../batches/batch.service";
-import { InvalidStateError, listBatchDrafts, StaleActionError } from "../batches/draft.service";
+import { getFinalImage, InvalidStateError, listBatchDrafts, StaleActionError } from "../batches/draft.service";
 import { getOwnedBoard } from "../pinterest/boards.service";
 import { getUser } from "../users/user.service";
 import { buildTimeline } from "../../utils/time";
@@ -39,6 +39,8 @@ export async function schedulableDrafts(batchId: string) {
     if (d.status === "GENERATING" || d.status === "CREATED") blocking.push(`Pin ${d.position} is still generating`);
     else if (!d.selectedImageId) blocking.push(`Pin ${d.position} has no image`);
     else if (!d.selectedBoardId) blocking.push(`Pin ${d.position} has no board assigned`);
+    else if (d.status !== "APPROVED" && (await getFinalImage(d))?.isFallback)
+      skipped.push(`Pin ${d.position} uses a fallback background and will be skipped — regenerate it, or approve it individually first`);
     else include.push(d);
   }
   return { include, blocking, skipped };

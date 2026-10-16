@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import { MockTextProvider, GradientImageProvider } from "../../src/modules/ai/mock.provider";
 import { QuoteService } from "../../src/modules/ai/quote.service";
 import { BoardAssignmentService } from "../../src/modules/boards/assignment.service";
-import { renderQuoteImage } from "../../src/modules/images/renderer.service";
+import { hammingDistance, MARGIN_X, MARGIN_Y, perceptualHash, renderQuoteImage } from "../../src/modules/images/renderer.service";
+import { buildBackgroundPrompt, GLOBAL_NEGATIVE, IMAGE_STYLES, IMAGE_STYLE_KEYS, resolveStyle } from "../../src/modules/images/styles";
 import { TextOverflowError } from "../../src/modules/images/typography.service";
 import type { PinterestBoard } from "../../src/db/schema";
 
@@ -17,7 +18,7 @@ const item = (quote: string) => ({
   description: "Emotional quotes about broken trust, betrayal, heartbreak and healing after a difficult relationship.",
   keywords: ["broken trust quotes", "betrayal quotes"],
   alt_text: "An emotional quote about broken trust over a dark background.",
-  style: "dark_cinematic",
+  style: "dark_romantic",
   background_prompt: "Lonely silhouette near a rainy window, moody, no words.",
 });
 
@@ -109,38 +110,99 @@ describe("BoardAssignmentService", () => {
   });
 });
 
-describe("renderer", () => {
-  const bg = () => new GradientImageProvider().generateBackground("", { style: "dark_cinematic", seed: 1 });
+describe("renderer (style system V2)", () => {
+  const bg = (style: string, seed = 1) => new GradientImageProvider(Object.fromEntries(IMAGE_STYLE_KEYS.map((k) => [k, IMAGE_STYLES[k].fallback]))).generateBackground("", { style, seed });
 
-  it("produces a 1000x1500 JPEG", async () => {
-    const r = await renderQuoteImage({ background: await bg(), quote: "You taught me that not every promise is meant to be kept.", style: "dark_cinematic", typography: "elegant_serif" });
+  it("produces a 1000x1500 sRGB JPEG that passes QA", async () => {
+    const r = await renderQuoteImage({ background: await bg("rainy_window"), quote: "You taught me that not every promise is meant to be kept.", style: "rainy_window" });
     const m = await sharp(r.buffer).metadata();
-    expect([m.width, m.height, m.format]).toEqual([1000, 1500, "jpeg"]);
-    expect(r.textColor).toBe("#f7f1e8");
+    expect([m.width, m.height, m.format, m.space]).toEqual([1000, 1500, "jpeg", "srgb"]);
+    expect(r.qa.passed).toBe(true);
+    expect(r.textColor).toBe(IMAGE_STYLES.rainy_window.text.light);
+    expect(r.typography).toBe("classic_serif");
   });
 
-  it("shrinks fonts for long quotes using measured layout", async () => {
-    const short = await renderQuoteImage({ background: await bg(), quote: "Let go.", style: "dark_cinematic", typography: "modern_sans" });
-    const long = await renderQuoteImage({ background: await bg(), quote: "Some people leave quietly, and the silence they leave behind becomes the loudest thing in the room for a very long time, and you learn to live beside it.", style: "dark_cinematic", typography: "modern_sans" });
+  it("chooses the style's dark text on light backgrounds", async () => {
+    const r = await renderQuoteImage({ background: await bg("minimal_typography"), quote: "Protect your peace like it matters.", style: "minimal_typography" });
+    expect(r.textColor).toBe(IMAGE_STYLES.minimal_typography.text.dark);
+    expect(r.layout).toBe("clean");
+  });
+
+  it("sizes short quotes 94–110px and long quotes smaller (Cormorant)", async () => {
+    const short = await renderQuoteImage({ background: await bg("soft_feminine_editorial"), quote: "You are allowed to bloom slowly.", style: "soft_feminine_editorial" });
+    const long = await renderQuoteImage({ background: await bg("soft_feminine_editorial"), quote: "Some people leave quietly, and the silence they leave behind becomes the loudest thing in the room for a very long time.", style: "soft_feminine_editorial" });
+    expect(short.fontSize).toBeGreaterThanOrEqual(94);
+    expect(short.fontSize).toBeLessThanOrEqual(110);
     expect(long.fontSize).toBeLessThan(short.fontSize);
+    expect(long.fontSize).toBeGreaterThanOrEqual(60);
   });
 
-  it("uses dark text on light backgrounds", async () => {
-    const light = await new GradientImageProvider({ beige_editorial: ["#f5efe6", "#efe6d8", "#e8dccb"] }).generateBackground("", { style: "beige_editorial", seed: 2 });
-    const r = await renderQuoteImage({ background: light, quote: "Healing is quiet work.", style: "beige_editorial", typography: "book_serif" });
-    expect(r.textColor).toBe("#2a2420");
+  it("keeps the quote inside the safe margins", async () => {
+    const r = await renderQuoteImage({ background: await bg("dreamy_sky"), quote: "Some days the bravest thing you can do is begin again, softly, without telling anyone.", style: "dreamy_sky" });
+    expect(r.box.left).toBeGreaterThanOrEqual(MARGIN_X - 1);
+    expect(r.box.top).toBeGreaterThanOrEqual(MARGIN_Y);
+    expect(r.box.top + r.box.height).toBeLessThanOrEqual(1500 - MARGIN_Y);
+    expect(r.qa.safeMargins && r.qa.noClipping).toBe(true);
   });
 
   it("refuses text that cannot fit instead of overflowing", async () => {
-    await expect(renderQuoteImage({ background: await bg(), quote: "word ".repeat(400), style: "dark_cinematic", typography: "elegant_serif" })).rejects.toBeInstanceOf(TextOverflowError);
+    await expect(renderQuoteImage({ background: await bg("dark_romantic"), quote: "word ".repeat(400), style: "dark_romantic" })).rejects.toBeInstanceOf(TextOverflowError);
   });
 
-  it("accepts non-2:3 AI backgrounds (e.g. Imagen 3:4) and crops to 2:3", async () => {
+  it("accepts non-2:3 AI backgrounds and maps legacy style ids", async () => {
     const wide = await sharp({ create: { width: 900, height: 1200, channels: 3, background: "#203040" } }).png().toBuffer();
-    const r = await renderQuoteImage({ background: wide, quote: "Still here.", style: "moody_blue", typography: "serif_italic", watermark: "@brand" });
+    const r = await renderQuoteImage({ background: wide, quote: "Still here.", style: "moody_blue" });
     expect([r.width, r.height]).toEqual([1000, 1500]);
+    expect(resolveStyle("moody_blue")).toBe("peaceful_ocean");
+    expect(resolveStyle("dark_cinematic")).toBe("dark_romantic");
+  });
+
+  it("uses a soft veil (never a panel) or moves region when contrast is poor", async () => {
+    const dots = Array.from({ length: 300 }, (_, i) => `<circle cx="${(i * 97) % 1000}" cy="${(i * 211) % 1500}" r="${10 + (i % 25)}" fill="${["#202020", "#f0f0f0", "#808080"][i % 3]}"/>`).join("");
+    const busy = await sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1500"><rect width="100%" height="100%" fill="#777"/>${dots}</svg>`)).png().toBuffer();
+    const r = await renderQuoteImage({ background: busy, quote: "My heart is learning to choose better.", style: "dark_romantic" });
+    expect(r.layout).toBe("veil");
+    expect(r.veilStrength).toBeGreaterThan(0);
   });
 });
+
+describe("style config", () => {
+  it("defines all 10 V2 styles with complete config", () => {
+    expect(IMAGE_STYLE_KEYS).toHaveLength(10);
+    for (const k of IMAGE_STYLE_KEYS) {
+      const s = IMAGE_STYLES[k];
+      expect(s.fallback).toHaveLength(3);
+      expect(s.variations.light.length).toBeGreaterThan(0);
+      expect(["upper", "upper_middle", "middle", "lower"]).toContain(s.textRegion);
+    }
+  });
+
+  it("builds prompts in the required order with global negatives", () => {
+    const p = buildBackgroundPrompt("vintage_paper", "a dried rose on an old letter", 1);
+    const iStyle = p.indexOf("vintage stationery");
+    const iHint = p.indexOf("Optional creative detail");
+    const iComp = p.indexOf("Composition:");
+    const iLight = p.indexOf("Lighting:");
+    const iQual = p.indexOf("Quality:");
+    const iNeg = p.indexOf("Avoid:");
+    expect([iStyle, iHint, iComp, iLight, iQual, iNeg].every((x, i, a) => x >= 0 && (i === 0 || x > a[i - 1]!))).toBe(true);
+    expect(p).toContain(GLOBAL_NEGATIVE);
+  });
+
+  it("varies prompts across a batch", () => {
+    expect(buildBackgroundPrompt("rainy_window", null, 0)).not.toBe(buildBackgroundPrompt("rainy_window", null, 1));
+  });
+
+  it("perceptual hash flags identical images and separates different ones", async () => {
+    const a = await bg2("#203040", "#90a0b0");
+    const b = await bg2("#f0e0d0", "#302010");
+    expect(hammingDistance(await perceptualHash(a), await perceptualHash(a))).toBe(0);
+    expect(hammingDistance(await perceptualHash(a), await perceptualHash(b))).toBeGreaterThan(6);
+  });
+});
+
+const bg2 = (c1: string, c2: string) =>
+  sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1500"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/></linearGradient></defs><rect width="100%" height="100%" fill="url(#g)"/></svg>`)).png().toBuffer();
 
 describe("Gemini schema conversion", () => {
   it("keeps only the documented JSON Schema subset", async () => {
@@ -151,20 +213,18 @@ describe("Gemini schema conversion", () => {
     expect(s).not.toContain("$schema");
     expect(s).not.toContain("minLength");
     expect(s).toContain('"properties"');
-    expect(s).toContain('"enum"');
+    expect(s).toContain('"description"');
   });
 });
 
-describe("aesthetic layout", () => {
-  it("puts text on a frosted card over busy backgrounds", async () => {
-    const dots = Array.from({ length: 300 }, (_, i) => `<circle cx="${(i * 97) % 1000}" cy="${(i * 211) % 1500}" r="${10 + (i % 25)}" fill="${["#d98ba0", "#7d9c6b", "#fbeee6"][i % 3]}"/>`).join("");
-    const busy = await sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1500"><rect width="100%" height="100%" fill="#e9c9c4"/>${dots}</svg>`)).png().toBuffer();
-    const r = await renderQuoteImage({ background: busy, quote: "My heart is learning to choose better.", style: "soft_romantic", typography: "elegant_serif" });
-    expect(r.layout).toBe("frosted");
-  });
-  it("keeps calm backgrounds clean", async () => {
-    const calm = await sharp({ create: { width: 1000, height: 1500, channels: 3, background: "#203040" } }).png().toBuffer();
-    const r = await renderQuoteImage({ background: calm, quote: "Still here.", style: "moody_blue", typography: "classic_serif" });
-    expect(r.layout).toBe("clean");
+
+describe("style selection", () => {
+  it("manual style overrides the AI's choice; legacy/unknown AI styles are normalised", async () => {
+    const p = new MockTextProvider();
+    p.handlers.quotes = () => ({ items: [{ ...item("Rain remembers the names we stopped saying."), style: "dark_cinematic" }] });
+    const manual = await new QuoteService(p).generateBatch({ ...opts, count: 1, imageStyle: "peaceful_ocean" });
+    expect(manual[0]!.style).toBe("peaceful_ocean");
+    const auto = await new QuoteService(p).generateBatch({ ...opts, count: 1 });
+    expect(auto[0]!.style).toBe("dark_romantic");
   });
 });

@@ -12,7 +12,7 @@ import { clampText, escapeHtml } from "../utils/text";
 import { formatLocal } from "../utils/time";
 import { cb } from "./callbacks";
 import type { BotContext } from "./context";
-import { latestBatch, previewBatch, showBatchSummary, showQueue, startGeneration } from "./flows";
+import { askStyle, latestBatch, previewBatch, showBatchSummary, showQueue } from "./flows";
 import { publishOptionsKeyboard } from "./keyboards";
 import { statusLabel } from "./presenters";
 import { showSettings } from "./handlers/settings";
@@ -39,7 +39,7 @@ export const COMMANDS: { command: string; description: string }[] = [
 
 const HELP = `<b>Pinterest AI Quote Agent</b>
 
-Send keywords (e.g. <i>broken trust, dark emotional</i>) or <i>7 sad relationship quotes</i> and I'll ask how many pins to create.
+Send keywords (e.g. <i>broken trust, dark emotional</i>) or <i>7 sad relationship quotes</i> and I'll ask how many pins and which style (10 styles or Auto) before creating anything.
 
 <b>Generate</b>: /create &lt;topic&gt; · /bulk 3|5|7 &lt;topic&gt;
 <b>Review</b>: /batches · /preview &lt;#&gt; · /drafts — edit, regenerate, change board, approve
@@ -77,7 +77,7 @@ export function registerCommands(bot: Composer<BotContext>) {
   bot.command("create", async (ctx) => {
     const topic = ctx.match.trim();
     if (!topic) return ctx.reply("Usage: /create <topic>, e.g. /create self-love after breakup");
-    await startGeneration(ctx, topic, 1);
+    await askStyle(ctx, topic, 1);
   });
 
   bot.command("bulk", async (ctx) => {
@@ -86,9 +86,9 @@ export function registerCommands(bot: Composer<BotContext>) {
       const topic = ctx.match.trim();
       if (!topic) return ctx.reply("Usage: /bulk 3|5|7 <topic>, e.g. /bulk 5 broken trust");
       const s = await getSettings(ctx.user.id);
-      return startGeneration(ctx, topic, s.defaultBatchSize);
+      return askStyle(ctx, topic, s.defaultBatchSize);
     }
-    await startGeneration(ctx, m[2]!, validateCount(Number(m[1])));
+    await askStyle(ctx, m[2]!, validateCount(Number(m[1])));
   });
 
   bot.command("connect", async (ctx) => {

@@ -1,6 +1,6 @@
 import { logger } from "../../config/logger";
 import { cleanQuote, cosine, lexicalSimilarity, wordCount } from "../../utils/text";
-import { isImageStyle, type ImageStyle } from "../images/styles";
+import { isImageStyle, resolveStyle, styleCatalogForPrompt, suggestStyle, type ImageStyle } from "../images/styles";
 import type { TextProvider } from "./provider.interface";
 import { QuoteBatchSchema, type QuoteItem } from "./schemas";
 import { normalizeSeo } from "./seo.service";
@@ -34,14 +34,15 @@ Rules:
 - Quotes must read well when displayed on an image: short sentences, no awkward line structure.
 - Each quote in a batch must be clearly different in wording, imagery and angle.
 - Titles and descriptions must be accurate, not misleading, and use keywords naturally without stuffing. Pinterest has no tags field; keywords are for natural use in the description.
-- background_prompt describes ONLY a visual scene (no text, letters or words) with calm negative space for text placement.`;
+- background_prompt is a SHORT optional scene detail (max ~20 words) that fits the chosen style — e.g. "a single dried rose" for vintage_paper. Only visual elements; never text, letters or words. The style itself defines the overall look.
+- style must be chosen semantically from the style catalogue by matching the quote's emotion and theme to each style's mood.`;
 
 function buildPrompt(o: QuoteGenerationOptions, n: number, avoid: string[]): string {
   const [minW, maxW] = QUOTE_LENGTH_RANGES[o.quoteLength];
   const styleLine =
     o.imageStyle === "auto"
-      ? "Choose the most fitting style for each quote from the allowed enum, varying styles across the batch where sensible."
-      : `Use style "${o.imageStyle}" for every item.`;
+      ? `Choose the best-fitting style for each quote from this catalogue by emotional meaning (not just keywords). Avoid repeating the same style across the batch unless the topic clearly calls for it.\nStyle catalogue:\n${styleCatalogForPrompt()}`
+      : `The user selected the style "${o.imageStyle}" — use it for every item and write background_prompt details that fit it.`;
   return `Create ${n} distinct Pinterest quote pins.
 Topic / keywords from the user: "${o.topic}"
 Language for quote, title and description: ${o.language}
@@ -90,8 +91,14 @@ export class QuoteService {
     }
   }
 
-  private sanitize(item: QuoteItem, o: QuoteGenerationOptions): QuoteItem {
-    const style = o.imageStyle !== "auto" ? o.imageStyle : isImageStyle(item.style) ? item.style : "dark_cinematic";
+  private sanitize(item: QuoteItem, o: QuoteGenerationOptions, used: ImageStyle[] = []): QuoteItem {
+    // Manual selection always wins; otherwise accept the AI's semantic choice (legacy ids mapped), else keyword fallback.
+    const style: ImageStyle =
+      o.imageStyle !== "auto"
+        ? o.imageStyle
+        : isImageStyle(item.style)
+          ? item.style
+          : resolveStyle(item.style, suggestStyle(`${o.topic} ${item.topic} ${item.emotion} ${item.quote}`, used));
     const seo = normalizeSeo(item);
     return { ...item, ...seo, quote: cleanQuote(item.quote), style };
   }
@@ -115,7 +122,8 @@ export class QuoteService {
         schema: QuoteBatchSchema,
         temperature: 1.0,
       });
-      let cands = res.items.map((i) => this.sanitize(i, o)).filter((i) => this.validLength(i.quote, o.quoteLength));
+      const used: ImageStyle[] = accepted.map((a) => a.style as ImageStyle);
+      let cands = res.items.map((i) => { const c = this.sanitize(i, o, used); used.push(c.style as ImageStyle); return c; }).filter((i) => this.validLength(i.quote, o.quoteLength));
       cands = cands.filter((c, idx) => {
         const others = [...pool, ...accepted.map((a) => a.quote), ...cands.slice(0, idx).map((x) => x.quote)];
         return !this.isLexicalDuplicate(c.quote, others);

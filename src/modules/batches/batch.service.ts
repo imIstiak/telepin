@@ -9,6 +9,7 @@ import { BoardAssignmentService, type AssignmentResult } from "../boards/assignm
 import { getOwnedBoard, listBoards } from "../pinterest/boards.service";
 import { deriveBatchStatus } from "../state/state-machine";
 import { getSettings } from "../users/user.service";
+import { isImageStyle, isTypographyPreset, type ImageStyle } from "../images/styles";
 import { changeDraft, InvalidStateError, listBatchDrafts, NotFoundError } from "./draft.service";
 
 export const ALLOWED_COUNTS = [1, 3, 5, 7] as const;
@@ -27,14 +28,15 @@ export function validateTopic(topic: string): string {
   return t;
 }
 
-export async function createBatch(userId: string, topic: string, count: number): Promise<PinBatch> {
+export async function createBatch(userId: string, topic: string, count: number, style: ImageStyle | "auto" = "auto"): Promise<PinBatch> {
+  if (style !== "auto" && !isImageStyle(style)) throw new InvalidStateError("Unknown image style.");
   const t = validateTopic(topic);
   const n = validateCount(count);
   const settings = await getSettings(userId);
   const batch = await db.transaction(async (tx) => {
     const [b] = await tx
       .insert(pinBatches)
-      .values({ userId, originalTopic: t, requestedCount: n, boardAssignmentMode: settings.defaultBoardAssignmentMode, status: "GENERATING" })
+      .values({ userId, originalTopic: t, requestedCount: n, boardAssignmentMode: settings.defaultBoardAssignmentMode, imageStyle: style, status: "GENERATING" })
       .returning();
     await tx.insert(pinDrafts).values(
       Array.from({ length: n }, (_, i) => ({
@@ -43,11 +45,13 @@ export async function createBatch(userId: string, topic: string, count: number):
         position: i + 1,
         topic: t,
         status: "GENERATING" as const,
-        typography: settings.typographyPreset,
+        // null → the style's own typography; a fixed preset only if the user chose one in /settings.
+        typography: isTypographyPreset(settings.typographyPreset) ? settings.typographyPreset : null,
+        imageStyle: style === "auto" ? null : style,
         link: settings.defaultLink,
       })),
     );
-    await audit({ userId, batchId: b!.id, action: "batch.created", details: { topic: t, count: n } }, tx);
+    await audit({ userId, batchId: b!.id, action: "batch.created", details: { topic: t, count: n, style } }, tx);
     return b!;
   });
   await getQueues().content.add("batch", { kind: "batch", batchId: batch.id }, { jobId: `content-${batch.id}` });

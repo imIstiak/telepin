@@ -22,6 +22,7 @@ import {
   showBoardPicker,
   showQueue,
   showScheduleReview,
+  askStyle,
   startGeneration,
 } from "../flows";
 import { batchEditListKeyboard, confirmKeyboard, intervalKeyboard, publishOptionsKeyboard, regenerateKeyboard, startTimeKeyboard, styleKeyboard, typographyKeyboard } from "../keyboards";
@@ -68,7 +69,23 @@ const handlers: Record<string, Handler> = {
     const pending = ctx.user.pendingAction;
     if (pending?.kind !== "choose_count") throw new StaleActionError("Send your keywords again, then choose the number of pins.");
     await setPendingAction(ctx.user.id, null);
-    await startGeneration(ctx, pending.topic, n);
+    await askStyle(ctx, pending.topic, n);
+  },
+
+  // ----- style chooser (before generation) -----
+  sty: async (ctx, p) => {
+    const pending = ctx.user.pendingAction;
+    if (pending?.kind !== "choose_style") throw new StaleActionError("Send your keywords again to start a new batch.");
+    await setPendingAction(ctx.user.id, null);
+    const arg = p.args[0];
+    if (arg === "x") return void (await ctx.reply("Cancelled — nothing was generated."));
+    const style = arg === "a" ? "auto" : need(IMAGE_STYLE_KEYS[need(p.int(0))]);
+    try {
+      await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+    } catch {
+      /* message too old to edit */
+    }
+    await startGeneration(ctx, pending.topic, pending.count, style);
   },
 
   // ----- batch level -----
@@ -91,6 +108,7 @@ const handlers: Record<string, Handler> = {
     const r = await approveAll(ctx.user.id, batchId);
     const parts = [`✅ Approved: ${r.approved.length ? r.approved.map((n) => `#${n}`).join(", ") : "none"}`];
     if (r.missingBoard.length) parts.push(`📌 Need a board first: ${r.missingBoard.map((n) => `#${n}`).join(", ")}`);
+    if (r.fallback.length) parts.push(`⚠️ Fallback background (AI image failed) — regenerate or approve individually: ${r.fallback.map((n) => `#${n}`).join(", ")}`);
     if (r.notReady.length) parts.push(`⏳ Not ready: ${r.notReady.map((n) => `#${n}`).join(", ")}`);
     await ctx.reply(parts.join("\n"));
     await showBatchSummary(ctx, batchId);

@@ -56,7 +56,7 @@ export function regenerateKeyboard(d: PinDraft) {
 export function styleKeyboard(d: PinDraft) {
   const kb = new InlineKeyboard();
   IMAGE_STYLE_KEYS.forEach((k, i) => {
-    kb.text(`${d.imageStyle === k ? "• " : ""}${IMAGE_STYLES[k].label}`, cb("rss", d.id, d.version, i));
+    kb.text(`${d.imageStyle === k ? "• " : ""}${IMAGE_STYLES[k].emoji} ${IMAGE_STYLES[k].label}`, cb("rss", d.id, d.version, i));
     if (i % 2 === 1) kb.row();
   });
   return kb.row().text("⬅️ Back", cb("rg", d.id, d.version));
@@ -147,6 +147,17 @@ export function queueBatchKeyboard(batchId: string, paused: boolean) {
   if (paused) kb.text("▶️ Resume", cb("qr", batchId));
   else kb.text("⏸ Pause", cb("qp", batchId));
   return kb.text("🕒 Reschedule", cb("rsc", batchId)).text("🗑 Cancel", cb("qx", batchId));
+}
+
+/** Style picker shown before generation: Auto + every V2 style (2 per row). `current` marks the user's default. */
+export function newBatchStyleKeyboard(current?: string | null) {
+  const mark = (k: string) => (current === k ? "• " : "");
+  const kb = new InlineKeyboard().text(`${mark("auto")}✨ Auto — AI picks the best style per pin`, cb("sty", "a")).row();
+  IMAGE_STYLE_KEYS.forEach((k, i) => {
+    kb.text(`${mark(k)}${IMAGE_STYLES[k].emoji} ${IMAGE_STYLES[k].label}`, cb("sty", i));
+    if (i % 2 === 1) kb.row();
+  });
+  return kb.row().text("✖️ Cancel", cb("sty", "x"));
 }
 
 export function countKeyboard() {

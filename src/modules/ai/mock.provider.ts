@@ -37,7 +37,7 @@ export class MockTextProvider implements TextProvider {
     const topic = String(input.topic ?? "heartbreak");
     if (req.task === "quotes" || req.task === "rewrite_quote") {
       const n = Number(input.count ?? 1);
-      const style = input.imageStyle && input.imageStyle !== "auto" ? String(input.imageStyle) : "dark_cinematic";
+      const style = input.imageStyle && input.imageStyle !== "auto" ? String(input.imageStyle) : "rainy_window";
       const items = Array.from({ length: n }, () => {
         const quote = BANK[this.cursor++ % BANK.length]!;
         return {
